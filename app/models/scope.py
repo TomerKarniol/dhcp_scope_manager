@@ -1,104 +1,10 @@
 from __future__ import annotations
-from ipaddress import IPv4Address
-from typing import Literal, Optional
+from ipaddress import IPv4Address, IPv4Network
+from typing import Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-
-class DhcpExclusion(BaseModel):
-    startAddress: IPv4Address = Field(
-        description="First IP address in the exclusion range",
-        examples=["10.20.30.1"],
-    )
-    endAddress: IPv4Address = Field(
-        description="Last IP address in the exclusion range",
-        examples=["10.20.30.99"],
-    )
-
-    @model_validator(mode="after")
-    def end_gte_start(self) -> "DhcpExclusion":
-        if int(self.endAddress) < int(self.startAddress):
-            raise ValueError(
-                f"endAddress {self.endAddress} must be >= startAddress {self.startAddress}"
-            )
-        return self
-
-
-class DhcpFailover(BaseModel):
-    partnerServer: str = Field(
-        min_length=1,
-        max_length=255,
-        description="FQDN of the partner DHCP server",
-        examples=["dhcp02.lab.local"],
-    )
-    relationshipName: str = Field(
-        min_length=1,
-        max_length=64,
-        description="Failover relationship name (unique per DHCP server pair)",
-        examples=["mce1-failover"],
-    )
-    mode: Literal["HotStandby", "LoadBalance"] = Field(
-        description="Failover mode: HotStandby (active/standby) or LoadBalance"
-    )
-    serverRole: Optional[Literal["Active", "Standby"]] = Field(
-        default=None,
-        description=(
-            "Role of THIS server. Required when mode is 'HotStandby'. "
-            "Normalized to 'Active' for LoadBalance (not used in that mode)."
-        ),
-    )
-    reservePercent: int = Field(
-        default=0,
-        ge=0,
-        le=100,
-        description=(
-            "Percentage of addresses reserved for the standby server. "
-            "Used only in HotStandby mode. Normalized to 0 for LoadBalance."
-        ),
-    )
-    loadBalancePercent: Optional[int] = Field(
-        default=None,
-        ge=0,
-        le=100,
-        description=(
-            "Percentage of load handled by THIS server. "
-            "Required when mode is 'LoadBalance'. "
-            "Normalized to 0 for HotStandby (not used in that mode)."
-        ),
-    )
-    maxClientLeadTimeMinutes: int = Field(
-        ge=1,
-        le=1440,
-        description="Max client lead time in minutes (1–1440, i.e. up to 24 hours)",
-    )
-    sharedSecret: Optional[str] = Field(
-        default=None,
-        min_length=1,
-        max_length=256,
-        description="Shared secret for failover authentication. null = no authentication. "
-                    "Empty string is not valid; use null to indicate no authentication.",
-    )
-
-    @model_validator(mode="after")
-    def enforce_mode_fields(self) -> "DhcpFailover":
-        """Normalize and validate mode-specific fields.
-
-        HotStandby: serverRole is required; loadBalancePercent is not used → normalized to 0.
-        LoadBalance: loadBalancePercent is required; serverRole and reservePercent are not
-                     used → normalized to canonical values ('Active' and 0).
-
-        Normalization (not rejection) is intentional: it prevents GET/PUT parity mismatches
-        when Helm values.yaml includes unused-mode fields.
-        """
-        if self.mode == "HotStandby":
-            if self.serverRole is None:
-                raise ValueError("serverRole is required when mode is 'HotStandby'")
-            self.loadBalancePercent = 0
-        else:  # LoadBalance
-            if self.loadBalancePercent is None:
-                raise ValueError("loadBalancePercent is required when mode is 'LoadBalance'")
-            self.serverRole = "Active"
-            self.reservePercent = 0
-        return self
+from app.models.exclusion import DhcpExclusion
+from app.models.failover import DhcpFailover
 
 
 class DhcpScopePayload(BaseModel):
@@ -191,8 +97,6 @@ class DhcpScopePayload(BaseModel):
     @model_validator(mode="after")
     def validate_subnet_consistency(self) -> "DhcpScopePayload":
         """Validate that network/subnetMask is a valid subnet and all IPs fall within it."""
-        from ipaddress import IPv4Network
-
         # strict=True: raises if network has host bits set, or mask is non-contiguous
         try:
             subnet = IPv4Network(f"{self.network}/{self.subnetMask}", strict=True)

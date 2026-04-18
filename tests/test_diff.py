@@ -1,5 +1,5 @@
 """Tests for the PUT diff logic in scope_service.update_scope."""
-from unittest.mock import patch, call, MagicMock
+from unittest.mock import patch
 import pytest
 from app.models import DhcpExclusion, DhcpFailover, DhcpScopePayload
 from app.services.ps_executor import PowerShellError

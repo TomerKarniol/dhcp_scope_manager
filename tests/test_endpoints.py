@@ -1,6 +1,6 @@
 """API endpoint tests using FastAPI TestClient with mocked service layer."""
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
@@ -279,21 +279,21 @@ def test_powershell_error_500():
 # ---------------------------------------------------------------------------
 
 def test_auth_required_when_token_set():
-    import app.routers.scopes as scopes_mod
-    original = scopes_mod.settings.DHCP_API_TOKEN
-    scopes_mod.settings.DHCP_API_TOKEN = "secret-token"
+    import app.dependencies.auth as auth_mod
+    original = auth_mod.settings.DHCP_API_TOKEN
+    auth_mod.settings.DHCP_API_TOKEN = "secret-token"
     try:
         r = client.get("/api/v1/scopes/10.20.30.0")
         assert r.status_code == 401
     finally:
-        scopes_mod.settings.DHCP_API_TOKEN = original
+        auth_mod.settings.DHCP_API_TOKEN = original
 
 
 def test_auth_passes_with_correct_token():
-    import app.routers.scopes as scopes_mod
+    import app.dependencies.auth as auth_mod
     scope = _make_scope()
-    original = scopes_mod.settings.DHCP_API_TOKEN
-    scopes_mod.settings.DHCP_API_TOKEN = "secret-token"
+    original = auth_mod.settings.DHCP_API_TOKEN
+    auth_mod.settings.DHCP_API_TOKEN = "secret-token"
     try:
         with patch("app.services.scope_service.assemble_scope_state", return_value=scope):
             r = client.get(
@@ -302,7 +302,7 @@ def test_auth_passes_with_correct_token():
             )
         assert r.status_code == 200
     finally:
-        scopes_mod.settings.DHCP_API_TOKEN = original
+        auth_mod.settings.DHCP_API_TOKEN = original
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +310,7 @@ def test_auth_passes_with_correct_token():
 # ---------------------------------------------------------------------------
 
 def test_healthz_endpoint():
-    with patch("app.routers.health.validate_dhcp_environment"):
+    with patch("app.services.dhcp_service.validate_dhcp_environment"):
         r = client.get("/healthz")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
@@ -441,7 +441,7 @@ def test_list_scopes_item_shape_matches_single_scope_get(
         if "Get-DhcpServerv4ExclusionRange" in cmd:
             return mock_ps_exclusions_raw
         if "Get-DhcpServerv4Failover" in cmd:
-            raise PSE(cmd, "No failover configured", 1)
+            raise PSE(cmd, "Cannot find failover relationship for scope", 1)
         return None
 
     with patch("app.services.scope_service.run_ps", side_effect=fake_run_ps), \
@@ -477,7 +477,7 @@ def test_list_scopes_failover_null_consistent(
         if "Get-DhcpServerv4ExclusionRange" in cmd:
             return mock_ps_exclusions_raw
         if "Get-DhcpServerv4Failover" in cmd:
-            raise PSE(cmd, "No failover configured", 1)
+            raise PSE(cmd, "Cannot find failover relationship for scope", 1)
         return None
 
     with patch("app.services.scope_service.run_ps", side_effect=fake_run_ps), \
@@ -533,7 +533,7 @@ def test_get_put_roundtrip(
         if "Get-DhcpServerv4ExclusionRange" in cmd:
             return mock_ps_exclusions_raw
         if "Get-DhcpServerv4Failover" in cmd:
-            raise PowerShellError(cmd, "No failover configured", 1)
+            raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):

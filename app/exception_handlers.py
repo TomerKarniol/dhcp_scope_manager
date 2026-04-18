@@ -2,7 +2,7 @@ import logging
 import re
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
-from app.services.dhcp_env import DhcpEnvironmentError
+from app.services.dhcp_service import DhcpEnvironmentError
 from app.services.ps_executor import PowerShellError
 from app.utils.exceptions import DhcpApiError
 
@@ -25,11 +25,22 @@ def _sanitize_ps_stderr(stderr: str) -> str:
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    """Register all global exception handlers on the FastAPI app.
+
+    Handles:
+    - DhcpApiError       → HTTP {exc.http_status} with detail field.
+      Catches domain exceptions raised from dependency functions (e.g. auth, scope_id
+      validation), which execute before the route handler and are outside the
+      per-service handle_http_errors decorator.
+    - DhcpEnvironmentError → HTTP 503 with reason + detail fields.
+      Raised when the runtime does not support DHCP automation (wrong OS, missing
+      PowerShell, missing DHCP cmdlets).
+    - PowerShellError    → HTTP 500 with ps_error field (stderr sanitized).
+      Raised when a PowerShell cmdlet exits non-zero during a DHCP operation.
+    """
 
     @app.exception_handler(DhcpApiError)
     async def domain_error_handler(request: Request, exc: DhcpApiError) -> JSONResponse:
-        # Catches domain exceptions raised from dependency functions, which execute
-        # before the route handler and are therefore outside the handle_http_errors decorator.
         logger.warning(
             "Domain error on %s %s: [%d] %s",
             request.method,
@@ -42,29 +53,10 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={"detail": exc.detail},
         )
 
-    """Register all global exception handlers on the FastAPI app.
-
-    Handles:
-    - DhcpEnvironmentError → HTTP 503 with reason + detail fields
-      Raised when the runtime does not support DHCP automation (wrong OS, missing
-      PowerShell, missing DHCP cmdlets).  503 is appropriate: the server exists
-      but cannot currently service DHCP requests.
-
-    - PowerShellError → HTTP 500 with ps_error field
-      Raised when a PowerShell cmdlet exits non-zero during a DHCP operation.
-    """
-
     @app.exception_handler(DhcpEnvironmentError)
     async def dhcp_env_error_handler(
         request: Request, exc: DhcpEnvironmentError
     ) -> JSONResponse:
-        """
-        Converts DhcpEnvironmentError into HTTP 503.
-
-        Response body:
-        - ``detail``: human-readable description (suitable for operator logs/alerts)
-        - ``reason``: machine-readable code from DhcpEnvReason (suitable for tooling)
-        """
         logger.error(
             "DHCP environment error on %s %s [%s]: %s",
             request.method,
@@ -79,13 +71,6 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(PowerShellError)
     async def powershell_error_handler(request: Request, exc: PowerShellError) -> JSONResponse:
-        """
-        Converts unhandled PowerShellError into HTTP 500.
-
-        Response body:
-        - ``detail``: human-readable error message
-        - ``ps_error``: raw stderr from PowerShell (useful for diagnosing DHCP server issues)
-        """
         logger.error(
             "PowerShell error on %s %s: %s",
             request.method,

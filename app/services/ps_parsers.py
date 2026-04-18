@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging
 from app.models import DhcpExclusion, DhcpFailover, DhcpScopePayload
-from app.services.ps_executor import PowerShellError, run_ps
+from app.services.ps_executor import PowerShellError, is_not_found_error, run_ps
 from app.utils.ip_utils import ip_to_int, parse_timespan_days, parse_timespan_minutes
 
 logger = logging.getLogger(__name__)
@@ -66,24 +66,34 @@ def assemble_scope_state(scope_id: str) -> DhcpScopePayload:
     options = normalize_list(options_raw)
 
     # 3. Exclusion ranges
-    failover_obj: DhcpFailover | None = None
+    # A scope with no exclusions returns empty output (not an error).
+    # Re-raise unexpected errors (permission denied, PS crash) — silently returning
+    # no exclusions would cause the next reconciliation to delete them from the server.
     exclusions_raw = None
     try:
         exclusions_raw = run_ps(f"Get-DhcpServerv4ExclusionRange -ScopeId {scope_id}")
-    except PowerShellError:
-        exclusions_raw = None
+    except PowerShellError as exc:
+        if not is_not_found_error(exc.stderr):
+            raise
+        # Scope exists but has no exclusion ranges — treat as empty.
 
     exclusions_list = normalize_list(exclusions_raw)
 
     # 4. Failover (may not exist — that is normal)
+    # Windows DHCP raises a "not found" error when the scope has no failover relationship.
+    # Re-raise unexpected errors (permission denied, PS crash) — silently returning
+    # null failover would cause the next reconciliation to remove the relationship.
+    failover_obj: DhcpFailover | None = None
     try:
         failover_raw = run_ps(f"Get-DhcpServerv4Failover -ScopeId {scope_id}")
         if failover_raw:
             failover_obj = parse_failover(
                 failover_raw if isinstance(failover_raw, dict) else failover_raw[0]
             )
-    except PowerShellError:
-        failover_obj = None
+    except PowerShellError as exc:
+        if not is_not_found_error(exc.stderr):
+            raise
+        # No failover relationship for this scope.
 
     # Parse lease duration: "8.00:00:00" → 8
     lease_days = parse_timespan_days(str(scope.get("LeaseDuration", "8.00:00:00")))

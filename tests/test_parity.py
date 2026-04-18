@@ -104,11 +104,11 @@ def _assemble(scope_raw, options_raw, exclusions_raw, failover_raw=None) -> dict
             return options_raw
         if "Get-DhcpServerv4ExclusionRange" in cmd:
             if exclusions_raw is None:
-                raise PowerShellError(cmd, "No exclusions configured", 1)
+                raise PowerShellError(cmd, "Cannot find exclusion range for scope", 1)
             return exclusions_raw
         if "Get-DhcpServerv4Failover" in cmd:
             if failover_raw is None:
-                raise PowerShellError(cmd, "No failover configured", 1)
+                raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
             return failover_raw
         return None
 

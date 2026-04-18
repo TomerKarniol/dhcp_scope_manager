@@ -23,6 +23,8 @@ import subprocess
 import threading
 import time
 
+from app.utils.decorators import handle_health_errors
+
 logger = logging.getLogger(__name__)
 
 
@@ -261,3 +263,9 @@ def validate_dhcp_environment() -> None:
         logger.info("DHCP environment validation passed — caching result")
         _cache_ok = True
         _cache_exc = None
+
+
+@handle_health_errors
+def check_health() -> dict:
+    validate_dhcp_environment()
+    return {"status": "ok"}

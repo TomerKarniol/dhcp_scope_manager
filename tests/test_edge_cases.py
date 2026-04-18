@@ -2,7 +2,7 @@
 
 Covers bugs found during the aggressive audit:
   1. ps_executor: json.JSONDecodeError → PowerShellError
-  2. dhcp_env: TimeoutExpired in _check_powershell_binary / _check_dhcp_cmdlets → DhcpEnvironmentError
+  2. dhcp_service: TimeoutExpired in _check_powershell_binary / _check_dhcp_cmdlets → DhcpEnvironmentError
   3. scope_service.update_scope: startRange/endRange included in diff
   4. scope_service._remove_scope_from_failover: handles list return from Get-DhcpServerv4Failover
   5. ps_parsers.assemble_scope_state: sort exclusions by (startAddress, endAddress)
@@ -16,7 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models import DhcpExclusion, DhcpFailover, DhcpScopePayload
-from app.services.dhcp_env import (
+from app.services.dhcp_service import (
     DhcpEnvironmentError,
     DhcpEnvReason,
     _check_dhcp_cmdlets,
@@ -60,7 +60,7 @@ class TestPsExecutorJsonError:
     def test_non_json_stdout_raises_powershell_error(self):
         """PS command succeeds (rc=0) but stdout is not JSON → PowerShellError, not ValueError."""
         mock_result = MagicMock(returncode=0, stdout="This is plain text\n", stderr="")
-        with patch("app.services.dhcp_env.validate_dhcp_environment"), \
+        with patch("app.services.dhcp_service.validate_dhcp_environment"), \
              patch("subprocess.run", return_value=mock_result):
             with pytest.raises(PowerShellError) as exc_info:
                 run_ps("Get-DhcpServerv4Scope -ScopeId 10.20.30.0")
@@ -69,7 +69,7 @@ class TestPsExecutorJsonError:
     def test_non_json_error_preserves_command(self):
         """PowerShellError from JSON parse should report rc=0 (command succeeded but output was bad)."""
         mock_result = MagicMock(returncode=0, stdout="WARNING: something\n", stderr="")
-        with patch("app.services.dhcp_env.validate_dhcp_environment"), \
+        with patch("app.services.dhcp_service.validate_dhcp_environment"), \
              patch("subprocess.run", return_value=mock_result):
             with pytest.raises(PowerShellError) as exc_info:
                 run_ps("Get-DhcpServerv4Scope")
@@ -78,7 +78,7 @@ class TestPsExecutorJsonError:
     def test_empty_stdout_returns_none(self):
         """Empty stdout must return None, not raise."""
         mock_result = MagicMock(returncode=0, stdout="", stderr="")
-        with patch("app.services.dhcp_env.validate_dhcp_environment"), \
+        with patch("app.services.dhcp_service.validate_dhcp_environment"), \
              patch("subprocess.run", return_value=mock_result):
             result = run_ps("Get-Something")
         assert result is None
@@ -86,14 +86,14 @@ class TestPsExecutorJsonError:
     def test_valid_json_parses_correctly(self):
         """Well-formed JSON stdout must be returned as parsed object."""
         mock_result = MagicMock(returncode=0, stdout='{"Name": "Test", "ScopeId": "10.20.30.0"}\n', stderr="")
-        with patch("app.services.dhcp_env.validate_dhcp_environment"), \
+        with patch("app.services.dhcp_service.validate_dhcp_environment"), \
              patch("subprocess.run", return_value=mock_result):
             result = run_ps("Get-DhcpServerv4Scope -ScopeId 10.20.30.0")
         assert result == {"Name": "Test", "ScopeId": "10.20.30.0"}
 
 
 # ---------------------------------------------------------------------------
-# 2. dhcp_env: TimeoutExpired → DhcpEnvironmentError, not unhandled exception
+# 2. dhcp_service: TimeoutExpired → DhcpEnvironmentError, not unhandled exception
 # ---------------------------------------------------------------------------
 
 class TestDhcpEnvTimeout:

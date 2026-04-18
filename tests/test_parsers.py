@@ -1,4 +1,4 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pytest
 from app.services.ps_executor import PowerShellError
 from app.services.ps_parsers import (
@@ -134,7 +134,7 @@ def test_assemble_scope_no_failover(
         if "Get-DhcpServerv4ExclusionRange" in cmd:
             return mock_ps_exclusions_raw
         if "Get-DhcpServerv4Failover" in cmd:
-            raise PowerShellError(cmd, "No failover configured", 1)
+            raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
@@ -150,9 +150,9 @@ def test_assemble_scope_empty_exclusions(mock_ps_scope_raw, mock_ps_options_raw)
         if "Get-DhcpServerv4OptionValue" in cmd:
             return mock_ps_options_raw
         if "Get-DhcpServerv4ExclusionRange" in cmd:
-            raise PowerShellError(cmd, "No exclusions", 1)
+            raise PowerShellError(cmd, "Cannot find exclusion range for scope", 1)
         if "Get-DhcpServerv4Failover" in cmd:
-            raise PowerShellError(cmd, "No failover", 1)
+            raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
@@ -176,7 +176,7 @@ def test_exclusions_sorted_by_ip(mock_ps_scope_raw, mock_ps_options_raw):
         if "Get-DhcpServerv4ExclusionRange" in cmd:
             return unsorted_exclusions
         if "Get-DhcpServerv4Failover" in cmd:
-            raise PowerShellError(cmd, "No failover", 1)
+            raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):

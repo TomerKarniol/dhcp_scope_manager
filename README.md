@@ -123,6 +123,23 @@ Base path: `/api/v1`
 
 `scope_id` is always the IPv4 network address of the scope (e.g. `10.20.30.0`).
 
+### `GET /healthz`
+
+Checks that the runtime environment can execute DHCP automation:
+
+1. Native Windows OS (not WSL / Linux / macOS)
+2. `powershell.exe` present and executable
+3. DHCP cmdlets available (`Get-DhcpServerv4Scope` discoverable)
+
+Not protected by auth or the DHCP environment dependency — intentionally always callable so it can report exactly what is wrong.
+
+| Status | Body | When |
+|---|---|---|
+| `200` | `{"status": "ok"}` | All checks pass |
+| `503` | `{"status": "error", "detail": "...", "reason": "..."}` | Any check fails |
+
+`reason` values: `unsupported_os`, `wsl_detected`, `powershell_not_found`, `powershell_exec_failed`, `dhcp_cmdlets_unavailable`.
+
 ## Canonical Payload Shape
 
 ```json

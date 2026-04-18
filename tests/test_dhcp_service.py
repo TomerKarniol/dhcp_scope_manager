@@ -7,13 +7,13 @@ to a no-op for all other test files; tests here intentionally override that patc
 when they need to exercise real validation or check route/execution-layer behaviour.
 """
 import subprocess
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.services.dhcp_env import (
+from app.services.dhcp_service import (
     DhcpEnvironmentError,
     DhcpEnvReason,
     _check_dhcp_cmdlets,
@@ -48,7 +48,7 @@ class TestCheckOs:
 
     def test_linux_rejected(self):
         with patch("platform.system", return_value="Linux"), \
-             patch("app.services.dhcp_env._is_wsl", return_value=False):
+             patch("app.services.dhcp_service._is_wsl", return_value=False):
             with pytest.raises(DhcpEnvironmentError) as exc_info:
                 _check_os()
         assert exc_info.value.reason == DhcpEnvReason.UNSUPPORTED_OS
@@ -56,7 +56,7 @@ class TestCheckOs:
 
     def test_wsl_rejected_with_distinct_reason(self):
         with patch("platform.system", return_value="Linux"), \
-             patch("app.services.dhcp_env._is_wsl", return_value=True):
+             patch("app.services.dhcp_service._is_wsl", return_value=True):
             with pytest.raises(DhcpEnvironmentError) as exc_info:
                 _check_os()
         assert exc_info.value.reason == DhcpEnvReason.WSL_DETECTED
@@ -155,38 +155,38 @@ class TestValidateDhcpEnvironment:
         _reset_validation_cache()
 
     def test_passes_when_all_checks_succeed(self):
-        with patch("app.services.dhcp_env._check_os"), \
-             patch("app.services.dhcp_env._check_powershell_binary"), \
-             patch("app.services.dhcp_env._check_dhcp_cmdlets"):
+        with patch("app.services.dhcp_service._check_os"), \
+             patch("app.services.dhcp_service._check_powershell_binary"), \
+             patch("app.services.dhcp_service._check_dhcp_cmdlets"):
             validate_dhcp_environment()  # must not raise
 
     def test_raises_on_os_failure(self):
         exc = _env_error(DhcpEnvReason.WSL_DETECTED, "WSL not supported")
-        with patch("app.services.dhcp_env._check_os", side_effect=exc):
+        with patch("app.services.dhcp_service._check_os", side_effect=exc):
             with pytest.raises(DhcpEnvironmentError) as exc_info:
                 validate_dhcp_environment()
         assert exc_info.value.reason == DhcpEnvReason.WSL_DETECTED
 
     def test_raises_on_powershell_failure(self):
         exc = _env_error(DhcpEnvReason.POWERSHELL_NOT_FOUND, "not found")
-        with patch("app.services.dhcp_env._check_os"), \
-             patch("app.services.dhcp_env._check_powershell_binary", side_effect=exc):
+        with patch("app.services.dhcp_service._check_os"), \
+             patch("app.services.dhcp_service._check_powershell_binary", side_effect=exc):
             with pytest.raises(DhcpEnvironmentError):
                 validate_dhcp_environment()
 
     def test_raises_on_cmdlet_failure(self):
         exc = _env_error(DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE, "no cmdlets")
-        with patch("app.services.dhcp_env._check_os"), \
-             patch("app.services.dhcp_env._check_powershell_binary"), \
-             patch("app.services.dhcp_env._check_dhcp_cmdlets", side_effect=exc):
+        with patch("app.services.dhcp_service._check_os"), \
+             patch("app.services.dhcp_service._check_powershell_binary"), \
+             patch("app.services.dhcp_service._check_dhcp_cmdlets", side_effect=exc):
             with pytest.raises(DhcpEnvironmentError):
                 validate_dhcp_environment()
 
     def test_result_cached_on_success(self):
         """Checks must only run once — second call must not invoke sub-checks."""
-        check_os = patch("app.services.dhcp_env._check_os")
-        check_ps = patch("app.services.dhcp_env._check_powershell_binary")
-        check_cmd = patch("app.services.dhcp_env._check_dhcp_cmdlets")
+        check_os = patch("app.services.dhcp_service._check_os")
+        check_ps = patch("app.services.dhcp_service._check_powershell_binary")
+        check_cmd = patch("app.services.dhcp_service._check_dhcp_cmdlets")
 
         with check_os as m_os, check_ps as m_ps, check_cmd as m_cmd:
             validate_dhcp_environment()
@@ -201,7 +201,7 @@ class TestValidateDhcpEnvironment:
         exc = _env_error(DhcpEnvReason.WSL_DETECTED, "WSL")
         check_os_mock = MagicMock(side_effect=exc)
 
-        with patch("app.services.dhcp_env._check_os", check_os_mock):
+        with patch("app.services.dhcp_service._check_os", check_os_mock):
             with pytest.raises(DhcpEnvironmentError):
                 validate_dhcp_environment()
 
@@ -225,7 +225,7 @@ class TestRouteLevelProtection:
 
     def test_dhcp_route_returns_503_on_wsl(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.WSL_DETECTED, "WSL not supported")
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
         assert r.status_code == 503
         body = r.json()
@@ -234,21 +234,21 @@ class TestRouteLevelProtection:
 
     def test_dhcp_route_returns_503_on_linux(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.UNSUPPORTED_OS, "Linux not supported")
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
         assert r.status_code == 503
         assert r.json()["reason"] == DhcpEnvReason.UNSUPPORTED_OS
 
     def test_dhcp_route_returns_503_on_no_powershell(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.POWERSHELL_NOT_FOUND, "PS not found")
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
         assert r.status_code == 503
         assert r.json()["reason"] == DhcpEnvReason.POWERSHELL_NOT_FOUND
 
     def test_dhcp_route_returns_503_on_cmdlets_unavailable(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE, "no cmdlets")
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
         assert r.status_code == 503
         assert r.json()["reason"] == DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE
@@ -261,26 +261,26 @@ class TestRouteLevelProtection:
             "leaseDurationDays": 8, "description": "", "gateway": "10.20.30.1",
             "dnsServers": [], "dnsDomain": "", "exclusions": [], "failover": None,
         }
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.post("/api/v1/scopes/10.20.30.0", json=payload)
         assert r.status_code == 503
 
     def test_delete_route_also_protected(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.WSL_DETECTED, "WSL")
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.delete(self._scope_path())
         assert r.status_code == 503
 
     def test_list_route_also_protected(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.WSL_DETECTED, "WSL")
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get("/api/v1/scopes")
         assert r.status_code == 503
 
     def test_503_body_has_reason_and_detail(self):
         """Response must always have machine-readable reason and human-readable detail."""
         exc = DhcpEnvironmentError(DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE, "cmdlet missing")
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
         body = r.json()
         assert "reason" in body
@@ -297,12 +297,12 @@ class TestExecutionLayerGuard:
     def setup_method(self):
         _reset_validation_cache()
 
-    def test_run_ps_raises_dhcp_env_error_when_env_invalid(self):
+    def test_run_ps_raises_dhcp_service_error_when_env_invalid(self):
         """run_ps() must raise DhcpEnvironmentError even if no route dependency ran."""
         from app.services.ps_executor import run_ps
 
         exc = DhcpEnvironmentError(DhcpEnvReason.WSL_DETECTED, "WSL")
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             with pytest.raises(DhcpEnvironmentError) as exc_info:
                 run_ps("Get-DhcpServerv4Scope -ScopeId 10.20.30.0")
         assert exc_info.value.reason == DhcpEnvReason.WSL_DETECTED
@@ -312,7 +312,7 @@ class TestExecutionLayerGuard:
         from app.services.ps_executor import run_ps
 
         exc = DhcpEnvironmentError(DhcpEnvReason.POWERSHELL_NOT_FOUND, "no PS")
-        with patch("app.services.dhcp_env.validate_dhcp_environment", side_effect=exc), \
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc), \
              patch("subprocess.run") as mock_sub:
             with pytest.raises(DhcpEnvironmentError):
                 run_ps("Get-DhcpServerv4Scope")
@@ -328,14 +328,14 @@ class TestHealthEndpoint:
         _reset_validation_cache()
 
     def test_healthz_returns_200_when_env_valid(self):
-        with patch("app.routers.health.validate_dhcp_environment"):
+        with patch("app.services.dhcp_service.validate_dhcp_environment"):
             r = client.get("/healthz")
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
     def test_healthz_returns_503_with_reason_on_env_error(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE, "no cmdlets")
-        with patch("app.routers.health.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get("/healthz")
         assert r.status_code == 503
         body = r.json()
@@ -345,7 +345,7 @@ class TestHealthEndpoint:
 
     def test_healthz_returns_503_for_wsl(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.WSL_DETECTED, "WSL")
-        with patch("app.routers.health.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get("/healthz")
         assert r.status_code == 503
         assert r.json()["reason"] == DhcpEnvReason.WSL_DETECTED
@@ -354,7 +354,7 @@ class TestHealthEndpoint:
         """Health endpoint must not inherit the scopes router dependency."""
         # Patch validate_dhcp_environment to fail — health endpoint must still respond
         exc = DhcpEnvironmentError(DhcpEnvReason.UNSUPPORTED_OS, "not Windows")
-        with patch("app.routers.health.validate_dhcp_environment", side_effect=exc):
+        with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get("/healthz")
         # Returns 503 (the handler runs and returns a structured response),
         # not a 500 unhandled exception

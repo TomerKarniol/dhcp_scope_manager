@@ -3,7 +3,7 @@ import logging
 import re
 import subprocess
 
-from app.services import dhcp_env
+from app.services import dhcp_service
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ def is_not_found_error(stderr: str) -> bool:
     return any(kw in lower for kw in ("not found", "does not exist", "no dhcp scope", "cannot find"))
 
 
+
 def run_ps(command: str, parse_json: bool = True) -> dict | list | None:
     """Execute a PowerShell command and optionally parse JSON output.
 
@@ -45,7 +46,7 @@ def run_ps(command: str, parse_json: bool = True) -> dict | list | None:
         DhcpEnvironmentError: if the runtime cannot support DHCP automation.
         PowerShellError: if the PowerShell command exits with a non-zero code.
     """
-    dhcp_env.validate_dhcp_environment()
+    dhcp_service.validate_dhcp_environment()
 
     full_cmd = f"{command} -ErrorAction Stop"
     if parse_json:

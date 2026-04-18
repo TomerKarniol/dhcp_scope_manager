@@ -4,9 +4,17 @@ from __future__ import annotations
 class DhcpApiError(Exception):
     """Base domain exception. Subclasses carry their own HTTP status code.
 
-    Raised anywhere in route or service code in place of HTTPException.
-    Converted to JSONResponse by handle_http_errors decorator and the global
-    exception handler (for errors raised inside FastAPI dependency functions).
+    Raised in route dependency functions (auth, input validation) in place of
+    HTTPException.  Converted to HTTP responses by two mechanisms:
+
+    1. handle_http_errors decorator — catches DhcpApiError from within service
+       calls and re-raises as HTTPException.
+    2. Global exception handler (exception_handlers.py) — catches DhcpApiError
+       raised from FastAPI dependency functions, which run before the route
+       handler and are therefore outside the service-layer decorator stack.
+
+    Note: PowerShell "not found" errors produce 404 responses via the
+    PowerShellError branch of handle_http_errors, not via NotFoundError.
     """
     http_status: int = 500
 
@@ -21,11 +29,3 @@ class BadRequestError(DhcpApiError):
 
 class UnauthorizedError(DhcpApiError):
     http_status = 401
-
-
-class NotFoundError(DhcpApiError):
-    http_status = 404
-
-
-class ConflictError(DhcpApiError):
-    http_status = 409
