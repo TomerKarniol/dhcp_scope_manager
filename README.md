@@ -182,6 +182,21 @@ helm template dhcp-request ./helm/hosted-cluster-integration \
   -f ./helm/hosted-cluster-integration/values.yaml
 ```
 
+## HTTP Response Codes
+
+| Code | Meaning | When |
+|---|---|---|
+| `200` | OK | Scope returned or updated |
+| `204` | No Content | Scope deleted (or did not exist) |
+| `400` | Bad Request | Invalid `scope_id` (non-IPv4), or path `scope_id` ≠ body `network` |
+| `401` | Unauthorized | Missing/invalid bearer token (only when `DHCP_API_TOKEN` is set) |
+| `404` | Not Found | Scope does not exist — Crossplane responds by issuing POST |
+| `422` | Unprocessable Entity | Pydantic body validation failed (field constraint violation) |
+| `500` | Internal Server Error | PowerShell cmdlet exited non-zero; body includes `detail` + `ps_error` |
+| `503` | Service Unavailable | Runtime cannot support DHCP (wrong OS, no PowerShell, no cmdlets); body includes `reason` field |
+
+`503` `reason` values: `unsupported_os`, `wsl_detected`, `powershell_not_found`, `powershell_exec_failed`, `dhcp_cmdlets_unavailable`.
+
 ## Reconciliation Contract
 
 Crossplane reconciles every ~60 seconds: GET current state → compare to desired PUT body → issue PUT on any diff.

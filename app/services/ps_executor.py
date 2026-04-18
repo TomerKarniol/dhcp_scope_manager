@@ -24,6 +24,12 @@ class PowerShellError(Exception):
         super().__init__(f"PowerShell command failed (rc={returncode}): {stderr}")
 
 
+def is_not_found_error(stderr: str) -> bool:
+    """Return True if PowerShell stderr indicates the requested object does not exist."""
+    lower = stderr.lower()
+    return any(kw in lower for kw in ("not found", "does not exist", "no dhcp scope", "cannot find"))
+
+
 def run_ps(command: str, parse_json: bool = True) -> dict | list | None:
     """Execute a PowerShell command and optionally parse JSON output.
 

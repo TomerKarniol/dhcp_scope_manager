@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from app.services.dhcp_env import DhcpEnvironmentError
 from app.services.ps_executor import PowerShellError
+from app.utils.exceptions import DhcpApiError
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,23 @@ def _sanitize_ps_stderr(stderr: str) -> str:
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+
+    @app.exception_handler(DhcpApiError)
+    async def domain_error_handler(request: Request, exc: DhcpApiError) -> JSONResponse:
+        # Catches domain exceptions raised from dependency functions, which execute
+        # before the route handler and are therefore outside the handle_http_errors decorator.
+        logger.warning(
+            "Domain error on %s %s: [%d] %s",
+            request.method,
+            request.url.path,
+            exc.http_status,
+            exc.detail,
+        )
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={"detail": exc.detail},
+        )
+
     """Register all global exception handlers on the FastAPI app.
 
     Handles:
