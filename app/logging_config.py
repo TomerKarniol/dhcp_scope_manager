@@ -39,9 +39,12 @@ LOGGING_CONFIG = {
             "formatter": "json",
         }
     },
-    "root": {"handlers": ["console"], "level": "INFO"},
+    "root": {"handlers": ["console"], "level": "INFO"},  # overridden by configure_logging(level)
 }
 
 
-def configure_logging() -> None:
-    logging.config.dictConfig(LOGGING_CONFIG)
+def configure_logging(level: str = "INFO") -> None:
+    logging.config.dictConfig({
+        **LOGGING_CONFIG,
+        "root": {"handlers": ["console"], "level": level.upper()},
+    })

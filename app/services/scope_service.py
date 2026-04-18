@@ -5,7 +5,7 @@ from typing import Optional
 from app.models import DhcpFailover, DhcpScopePayload
 from app.services.ps_executor import PowerShellError, is_not_found_error, run_ps
 from app.services.ps_parsers import assemble_scope_state, normalize_list
-from app.utils.decorators import handle_http_errors, log_call
+from app.utils.decorators import log_call
 from app.utils.ip_utils import ip_to_int
 
 logger = logging.getLogger(__name__)
@@ -78,18 +78,20 @@ def _run_ps_warn_on_error(cmd: str, warning_prefix: str) -> None:
 
 
 def _try_assemble_scope(scope_id: str) -> Optional[DhcpScopePayload]:
-    """Assemble scope state; return None if PowerShell cannot read the scope.
+    """Assemble scope state for delete pre-flight; return None if scope is not found.
 
-    Intentionally catches all PowerShellErrors (not just not-found) because this
-    is used only inside delete_scope, where any assembly failure means we cannot
-    safely determine what to clean up.  Returning None causes delete_scope to
-    abort early, which is safe — Crossplane will retry the DELETE on the next cycle.
-    Do NOT use this helper in read or update paths where data accuracy matters.
+    Only suppresses not-found errors (scope disappeared between existence check and
+    assembly — a benign race condition). All other PowerShellErrors are re-raised so
+    that unexpected failures (permission denied, PS crash, etc.) surface as 500 and
+    Crossplane retries the DELETE, rather than receiving a false 204 that causes it
+    to remove the CR while the scope remains on the DHCP server.
     """
     try:
         return assemble_scope_state(scope_id)
-    except PowerShellError:
-        return None
+    except PowerShellError as exc:
+        if is_not_found_error(exc.stderr):
+            return None
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -156,13 +158,11 @@ def create_scope(payload: DhcpScopePayload) -> DhcpScopePayload:
 
 
 @log_call
-@handle_http_errors
 def get_scope(scope_id: str) -> DhcpScopePayload:
     return assemble_scope_state(scope_id)
 
 
 @log_call
-@handle_http_errors
 def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePayload:
     current = assemble_scope_state(scope_id)
 

@@ -258,6 +258,22 @@ def test_delete_idempotent():
     assert r.status_code == 204
 
 
+def test_delete_ps_error_during_assembly_returns_500():
+    """Unexpected PowerShell failure during delete scope assembly must return 500, not 204.
+
+    If _try_assemble_scope raises for a non-not-found reason (e.g. permission denied),
+    delete_scope must propagate the error so Crossplane retries on the next cycle,
+    rather than receiving a false 204 that causes it to remove the CR while the scope
+    remains on the DHCP server.
+    """
+    with patch("app.services.scope_service.scope_exists", return_value=True), \
+         patch("app.services.scope_service.assemble_scope_state",
+               side_effect=PowerShellError("Get-DhcpServerv4Scope", "Access denied", 5)):
+        r = client.delete("/api/v1/scopes/10.20.30.0")
+    assert r.status_code == 500
+    assert "ps_error" in r.json()
+
+
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------

@@ -1,4 +1,3 @@
-from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
@@ -7,6 +6,7 @@ from app.dependencies.auth import verify_token
 from app.dependencies.scopes import validate_scope_id, validate_scope_request
 from app.models import DhcpScopePayload
 from app.services import dhcp_service, scope_service
+from app.utils.decorators import handle_http_errors
 
 
 def _require_dhcp_service() -> None:
@@ -35,6 +35,7 @@ def create_scope_by_id(
 
 
 @router.get("/scopes/{scope_id}", response_model=DhcpScopePayload, status_code=status.HTTP_200_OK)
+@handle_http_errors
 def get_scope(
     scope_id: str = Depends(validate_scope_id),
     _: None = Depends(verify_token),
@@ -43,11 +44,13 @@ def get_scope(
 
 
 @router.put("/scopes/{scope_id}", response_model=DhcpScopePayload, status_code=status.HTTP_200_OK)
+@handle_http_errors
 def update_scope(
     scope_and_payload: Annotated[tuple[str, DhcpScopePayload], Depends(validate_scope_request)],
+    scope_id: str = Depends(validate_scope_id),
     _: None = Depends(verify_token),
 ) -> DhcpScopePayload:
-    scope_id, payload = scope_and_payload
+    _, payload = scope_and_payload
     return scope_service.update_scope(scope_id, payload)
 
 

@@ -32,8 +32,15 @@ app/
   main.py                    FastAPI app bootstrap
   config.py                  Env-based settings (DHCP_API_TOKEN, HOST, PORT, LOG_LEVEL)
   logging_config.py          JSON structured logging
-  exception_handlers.py      Global API exception mapping
-  models.py                  Pydantic request/response models (DhcpScopePayload, DhcpFailover, DhcpExclusion)
+  exception_handlers.py      Global exception → HTTP mapping (PowerShellError, DhcpEnvironmentError)
+  dependencies/
+    auth.py                  Bearer token verification (verify_token dependency)
+    scopes.py                scope_id and request body validation (validate_scope_id, validate_scope_request)
+  models/
+    __init__.py              Re-exports DhcpScopePayload, DhcpFailover, DhcpExclusion
+    scope.py                 DhcpScopePayload — canonical request/response model
+    failover.py              DhcpFailover — failover relationship configuration
+    exclusion.py             DhcpExclusion — exclusion range
   routers/
     scopes.py                DHCP scope endpoints (POST/GET/PUT/DELETE /api/v1/scopes/{scope_id})
     health.py                /healthz runtime capability check
@@ -43,6 +50,7 @@ app/
     ps_parsers.py            Parse and normalize PowerShell JSON output
     scope_service.py         Core scope lifecycle logic (create / get / update / delete)
   utils/
+    decorators.py            Route-level decorators: handle_http_errors, handle_health_errors, log_call
     ip_utils.py              IP integer conversion and TimeSpan parsing helpers
 
 helm/hosted-cluster-integration/
@@ -93,12 +101,12 @@ pip install -r requirements.txt
 
 ## Configuration
 
-| Variable | Default | Description |
-|---|---|---|
-| `DHCP_API_TOKEN` | *(empty)* | Bearer token for auth. When unset, auth is disabled entirely. |
-| `HOST` | `0.0.0.0` | Bind address |
-| `PORT` | `8080` | Bind port |
-| `LOG_LEVEL` | `INFO` | Log level |
+| Variable         | Default   | Description                                                   |
+| ---------------- | --------- | ------------------------------------------------------------- |
+| `DHCP_API_TOKEN` | _(empty)_ | Bearer token for auth. When unset, auth is disabled entirely. |
+| `HOST`           | `0.0.0.0` | Bind address                                                  |
+| `PORT`           | `8080`    | Bind port                                                     |
+| `LOG_LEVEL`      | `INFO`    | Log level                                                     |
 
 A `.env` file in the repo root is also supported.
 
@@ -112,16 +120,104 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 
 Base path: `/api/v1`
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/scopes` | List all scopes (canonical payload list, sorted by network) |
-| `POST` | `/scopes/{scope_id}` | Create or ensure scope — used by Crossplane for all lifecycle operations |
-| `GET` | `/scopes/{scope_id}` | Get current canonical state (404 if not found → Crossplane issues POST) |
-| `PUT` | `/scopes/{scope_id}` | Diff-based update — applies only changed fields |
-| `DELETE` | `/scopes/{scope_id}` | Delete scope (idempotent — 204 even if not found) |
-| `GET` | `/healthz` | Runtime capability check (safe to call on non-Windows) |
-
 `scope_id` is always the IPv4 network address of the scope (e.g. `10.20.30.0`).
+
+All `/api/v1/scopes*` endpoints share two implicit checks that run before the handler:
+
+- **Environment guard** — rejects requests when the host cannot execute DHCP automation (wrong OS, missing PowerShell, no DHCP cmdlets). Returns `503`.
+- **Auth** — rejects requests when `DHCP_API_TOKEN` is set and the token is missing or wrong. Returns `401`.
+
+---
+
+### `GET /api/v1/scopes`
+
+Returns all scopes sorted by network address (ascending).
+
+| Status | Body                                                         | When                            |
+| ------ | ------------------------------------------------------------ | ------------------------------- |
+| `200`  | `[DhcpScopePayload, ...]`                                    | Success                         |
+| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token     |
+| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed        |
+| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation |
+
+---
+
+### `POST /api/v1/scopes/{scope_id}`
+
+Creates the scope if it does not exist, then converges all options, exclusions, and failover to the desired state. Idempotent — never fails if the scope already exists.
+
+| Status | Body                                                         | When                                                                        |
+| ------ | ------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `200`  | `DhcpScopePayload`                                           | Scope created or already present and converged                              |
+| `400`  | `{"detail": "..."}`                                          | `scope_id` is not a valid IPv4 address, or path `scope_id` ≠ body `network` |
+| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token                                                 |
+| `422`  | FastAPI validation error                                     | Request body fails Pydantic field constraints                               |
+| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed                                                    |
+| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation                                             |
+
+---
+
+### `GET /api/v1/scopes/{scope_id}`
+
+Returns the current canonical state of the scope. When Crossplane sees a `404` here it issues `POST` to create the scope.
+
+| Status | Body                                                         | When                                                       |
+| ------ | ------------------------------------------------------------ | ---------------------------------------------------------- |
+| `200`  | `DhcpScopePayload`                                           | Scope found                                                |
+| `400`  | `{"detail": "..."}`                                          | `scope_id` is not a valid IPv4 address                     |
+| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token                                |
+| `404`  | `{"detail": "Scope {scope_id} not found"}`                   | Scope does not exist on the DHCP server                    |
+| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed for a reason other than not-found |
+| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation                            |
+
+---
+
+### `PUT /api/v1/scopes/{scope_id}`
+
+Diff-based convergence — compares the current scope state to the desired payload and issues only the PowerShell cmdlets needed to reconcile the difference.
+
+| Changed fields                                                            | PowerShell cmdlet                                                                            |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `scopeName`, `leaseDurationDays`, `description`, `startRange`, `endRange` | `Set-DhcpServerv4Scope`                                                                      |
+| `gateway`, `dnsServers`, `dnsDomain`                                      | `Set-DhcpServerv4OptionValue`                                                                |
+| Exclusions added                                                          | `Add-DhcpServerv4ExclusionRange`                                                             |
+| Exclusions removed                                                        | `Remove-DhcpServerv4ExclusionRange`                                                          |
+| Failover added / changed / removed                                        | `Add-DhcpServerv4Failover` / `Set-DhcpServerv4Failover` / `Remove-DhcpServerv4FailoverScope` |
+
+| Status | Body                                                         | When                                                                        |
+| ------ | ------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `200`  | `DhcpScopePayload`                                           | Scope updated (or already at desired state — no-op)                         |
+| `400`  | `{"detail": "..."}`                                          | `scope_id` is not a valid IPv4 address, or path `scope_id` ≠ body `network` |
+| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token                                                 |
+| `404`  | `{"detail": "Scope {scope_id} not found"}`                   | Scope does not exist — Crossplane responds by issuing `POST`                |
+| `422`  | FastAPI validation error                                     | Request body fails Pydantic field constraints                               |
+| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed                                                    |
+| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation                                             |
+
+---
+
+### `DELETE /api/v1/scopes/{scope_id}`
+
+Deletes the scope and cleans up its failover relationship and exclusion ranges. Idempotent — returns `204` even if the scope does not exist.
+
+Deletion order:
+
+1. Remove scope from failover relationship (`Remove-DhcpServerv4FailoverScope`)
+2. Remove failover relationship if now empty (`Remove-DhcpServerv4Failover`)
+3. Remove each exclusion range
+4. Remove the scope (`Remove-DhcpServerv4Scope -Force`)
+
+If failover detach fails, the delete propagates a `500` so Crossplane retries on the next cycle rather than removing the CR while the scope remains on the server.
+
+| Status | Body                                                         | When                                                   |
+| ------ | ------------------------------------------------------------ | ------------------------------------------------------ |
+| `204`  | _(empty)_                                                    | Scope deleted, or scope did not exist                  |
+| `400`  | `{"detail": "..."}`                                          | `scope_id` is not a valid IPv4 address                 |
+| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token                            |
+| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed (e.g. failover detach failed) |
+| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation                        |
+
+---
 
 ### `GET /healthz`
 
@@ -131,12 +227,13 @@ Checks that the runtime environment can execute DHCP automation:
 2. `powershell.exe` present and executable
 3. DHCP cmdlets available (`Get-DhcpServerv4Scope` discoverable)
 
-Not protected by auth or the DHCP environment dependency — intentionally always callable so it can report exactly what is wrong.
+Protected by auth (like all endpoints). Does **not** check the DHCP environment dependency before running — it is the check itself, so it always returns a structured response rather than a plain 503.
 
-| Status | Body | When |
-|---|---|---|
-| `200` | `{"status": "ok"}` | All checks pass |
-| `503` | `{"status": "error", "detail": "...", "reason": "..."}` | Any check fails |
+| Status | Body                                                    | When                        |
+| ------ | ------------------------------------------------------- | --------------------------- |
+| `200`  | `{"status": "ok"}`                                      | All checks pass             |
+| `401`  | `{"detail": "Unauthorized"}`                            | Bad or missing bearer token |
+| `503`  | `{"status": "error", "detail": "...", "reason": "..."}` | Any runtime check fails     |
 
 `reason` values: `unsupported_os`, `wsl_detected`, `powershell_not_found`, `powershell_exec_failed`, `dhcp_cmdlets_unavailable`.
 
@@ -154,9 +251,7 @@ Not protected by auth or the DHCP environment dependency — intentionally alway
   "gateway": "10.20.30.1",
   "dnsServers": ["10.10.1.5", "10.10.1.6"],
   "dnsDomain": "lab.local",
-  "exclusions": [
-    { "startAddress": "10.20.30.1", "endAddress": "10.20.30.10" }
-  ],
+  "exclusions": [{ "startAddress": "10.20.30.1", "endAddress": "10.20.30.10" }],
   "failover": null
 }
 ```
@@ -171,9 +266,9 @@ Not protected by auth or the DHCP environment dependency — intentionally alway
 
 Supported modes: `HotStandby`, `LoadBalance`
 
-| Mode | Required fields | Normalized fields |
-|---|---|---|
-| `HotStandby` | `serverRole` | `loadBalancePercent` → `0` |
+| Mode          | Required fields      | Normalized fields                                 |
+| ------------- | -------------------- | ------------------------------------------------- |
+| `HotStandby`  | `serverRole`         | `loadBalancePercent` → `0`                        |
 | `LoadBalance` | `loadBalancePercent` | `serverRole` → `"Active"`, `reservePercent` → `0` |
 
 Normalization at both the Helm template layer and the Pydantic model layer prevents GET/PUT drift
@@ -201,18 +296,18 @@ helm template dhcp-request ./helm/hosted-cluster-integration \
 
 ## HTTP Response Codes
 
-| Code | Meaning | When |
-|---|---|---|
-| `200` | OK | Scope returned or updated |
-| `204` | No Content | Scope deleted (or did not exist) |
-| `400` | Bad Request | Invalid `scope_id` (non-IPv4), or path `scope_id` ≠ body `network` |
-| `401` | Unauthorized | Missing/invalid bearer token (only when `DHCP_API_TOKEN` is set) |
-| `404` | Not Found | Scope does not exist — Crossplane responds by issuing POST |
-| `422` | Unprocessable Entity | Pydantic body validation failed (field constraint violation) |
-| `500` | Internal Server Error | PowerShell cmdlet exited non-zero; body includes `detail` + `ps_error` |
-| `503` | Service Unavailable | Runtime cannot support DHCP (wrong OS, no PowerShell, no cmdlets); body includes `reason` field |
+Quick reference — see the per-endpoint tables above for the exact set each route can return.
 
-`503` `reason` values: `unsupported_os`, `wsl_detected`, `powershell_not_found`, `powershell_exec_failed`, `dhcp_cmdlets_unavailable`.
+| Code  | Meaning               | Body shape                                                                                                     |
+| ----- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `200` | OK                    | `DhcpScopePayload` or `[DhcpScopePayload, ...]` or `{"status": "ok"}`                                          |
+| `204` | No Content            | _(empty)_ — DELETE only                                                                                        |
+| `400` | Bad Request           | `{"detail": "..."}` — invalid `scope_id` or path/body network mismatch                                         |
+| `401` | Unauthorized          | `{"detail": "Unauthorized"}` — only when `DHCP_API_TOKEN` is set                                               |
+| `404` | Not Found             | `{"detail": "Scope {scope_id} not found"}` — GET and PUT only                                                  |
+| `422` | Unprocessable Entity  | FastAPI validation error — POST and PUT only                                                                   |
+| `500` | Internal Server Error | `{"detail": "PowerShell command failed", "ps_error": "..."}`                                                   |
+| `503` | Service Unavailable   | `{"detail": "...", "reason": "..."}` or `{"status": "error", "detail": "...", "reason": "..."}` for `/healthz` |
 
 ## Reconciliation Contract
 
@@ -265,6 +360,7 @@ validate-dhcp-values:
 ```
 
 `validate_changed_clusters.py` is smart about scope:
+
 - `sites/{site}/config.yaml` changed → validates all clusters in that site
 - `sites/{site}/mce/{mce}/config.yaml` changed → validates all clusters in that MCE
 - `sites/{site}/mce/{mce}/hosted-cluster/{cluster}.yaml` changed → validates just that cluster
@@ -300,7 +396,3 @@ Test coverage includes:
 - `/healthz` is always safe to call regardless of OS.
 - Scope deletion is fail-safe: failover is detached before scope removal to prevent orphaned relationships.
 - If failover detach fails, the delete is retried on the next Crossplane reconciliation cycle.
-
-## License
-
-No license file is currently present in this repository.

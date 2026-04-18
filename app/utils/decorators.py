@@ -2,28 +2,24 @@ from __future__ import annotations
 import functools
 import logging
 import time
-from typing import Callable, TypeVar
+from typing import Any, Callable, ParamSpec, TypeVar
 
 from fastapi import HTTPException, status
 from fastapi.responses import JSONResponse
 
-# Circular import note:
-#   dhcp_service → decorators → ps_executor → dhcp_service (module-level reference)
-# ps_executor imports the dhcp_service MODULE (not a specific name), so Python's
-# partial-module mechanism resolves the cycle at import time.  DhcpEnvironmentError
-# is imported lazily inside handle_health_errors (at call time) for the same reason.
+from app.services.dhcp_service import DhcpEnvironmentError
 from app.services.ps_executor import PowerShellError, is_not_found_error
-from app.utils.exceptions import DhcpApiError
 
-F = TypeVar("F", bound=Callable)
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
-def log_call(func: F) -> F:
+def log_call(func: Callable[P, R]) -> Callable[P, R]:
     """Log entry, exit, and wall-clock duration of any service function."""
     logger = logging.getLogger(func.__module__)
 
     @functools.wraps(func)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         logger.info("→ %s", func.__name__)
         t0 = time.monotonic()
         try:
@@ -34,20 +30,16 @@ def log_call(func: F) -> F:
             logger.info("← %s raised (%.3fs)", func.__name__, time.monotonic() - t0)
             raise
 
-    return wrapper  # type: ignore[return-value]
+    return wrapper
 
 
-def handle_http_errors(func: F) -> F:
-    """Translate domain and PowerShell errors into HTTPException at the HTTP boundary.
+def handle_http_errors(func: Callable[P, R]) -> Callable[P, R]:
+    """Translate PowerShell not-found errors into HTTPException(404) at the HTTP boundary.
 
-    Handles (in order):
-    - DhcpApiError subclass       → HTTPException(exc.http_status, exc.detail)
+    Handles:
     - PowerShellError (not found) → HTTPException(404, "Scope {scope_id} not found")
     - PowerShellError (other)     → re-raise (global handler → HTTP 500)
-
-    The DhcpApiError branch is forward insurance: current decorated functions
-    (get_scope, update_scope) do not raise DhcpApiError, but if service-layer
-    validation is ever added, it will be translated correctly without changes here.
+    - DhcpEnvironmentError        → re-raise (global handler → HTTP 503)
 
     scope_id for 404 messages is resolved from kwargs["scope_id"] first, then
     the first positional argument — matching the convention of all service functions
@@ -55,14 +47,9 @@ def handle_http_errors(func: F) -> F:
     """
 
     @functools.wraps(func)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return func(*args, **kwargs)
-        except DhcpApiError as exc:
-            raise HTTPException(
-                status_code=exc.http_status,
-                detail=exc.detail,
-            ) from exc
         except PowerShellError as exc:
             if is_not_found_error(exc.stderr):
                 scope_id = kwargs.get("scope_id") or (str(args[0]) if args else "unknown")
@@ -72,20 +59,20 @@ def handle_http_errors(func: F) -> F:
                 ) from exc
             raise
 
-    return wrapper  # type: ignore[return-value]
+    return wrapper
 
 
-def handle_health_errors(func: F) -> F:
-    """For the /healthz route: converts DhcpEnvironmentError and any unexpected
-    Exception into a 503 JSONResponse with {status, detail, reason} shape.
+def handle_health_errors(func: Callable[P, Any]) -> Callable[P, Any]:
+    """Route-level decorator for /healthz: converts DhcpEnvironmentError into a 503
+    JSONResponse with {status, detail, reason} shape.
 
-    Keeps the health endpoint always callable even in broken environments —
-    it must never raise, only report.
+    Applied to the route handler (not the service function) so HTTP translation
+    stays in the API layer. Other exceptions propagate as-is so genuine bugs
+    surface as 500, not 503.
     """
 
     @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        from app.services.dhcp_service import DhcpEnvironmentError  # lazy — breaks circular import
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
         try:
             return func(*args, **kwargs)
         except DhcpEnvironmentError as exc:
@@ -93,10 +80,5 @@ def handle_health_errors(func: F) -> F:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={"status": "error", "detail": exc.detail, "reason": exc.reason},
             )
-        except Exception as exc:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"status": "error", "detail": str(exc)},
-            )
 
-    return wrapper  # type: ignore[return-value]
+    return wrapper

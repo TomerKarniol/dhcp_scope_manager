@@ -8,12 +8,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI
+from app.config import settings
 from app.logging_config import configure_logging
 from app.exception_handlers import register_exception_handlers
 from app.routers.scopes import router as scopes_router
 from app.routers.health import router as health_router
 
-configure_logging()
+configure_logging(settings.LOG_LEVEL)
 
 app = FastAPI(
     title="DHCP Scope Management API",
@@ -32,7 +33,6 @@ register_exception_handlers(app)
 
 if __name__ == "__main__":
     import uvicorn
-    from app.config import settings
 
     uvicorn.run(
         "app.main:app",
