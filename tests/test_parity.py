@@ -13,6 +13,7 @@ These tests trace every field from mock PowerShell output → parse → serializ
 and verify it matches exactly what the Helm template would render as the PUT body.
 """
 import json
+import asyncio
 from unittest.mock import patch
 import pytest
 from app.models import DhcpExclusion, DhcpFailover, DhcpScopePayload
@@ -113,7 +114,7 @@ def _assemble(scope_raw, options_raw, exclusions_raw, failover_raw=None) -> dict
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
-        result = assemble_scope_state("10.20.30.0")
+        result = asyncio.run(assemble_scope_state("10.20.30.0"))
     return result.model_dump(mode="json")
 
 

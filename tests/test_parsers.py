@@ -92,7 +92,8 @@ def test_extract_option_missing(mock_ps_options_raw):
     assert extract_option_list(mock_ps_options_raw, 999) == []
 
 
-def test_assemble_scope_state(
+@pytest.mark.asyncio
+async def test_assemble_scope_state(
     mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw, mock_ps_failover_raw
 ):
     def fake_run_ps(cmd, parse_json=True):
@@ -107,7 +108,7 @@ def test_assemble_scope_state(
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
-        result = assemble_scope_state("10.20.30.0")
+        result = await assemble_scope_state("10.20.30.0")
 
     assert result.scopeName == "Cluster-A Management"
     assert str(result.network) == "10.20.30.0"
@@ -123,7 +124,8 @@ def test_assemble_scope_state(
     assert result.failover.maxClientLeadTimeMinutes == 60
 
 
-def test_assemble_scope_no_failover(
+@pytest.mark.asyncio
+async def test_assemble_scope_no_failover(
     mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw
 ):
     def fake_run_ps(cmd, parse_json=True):
@@ -138,12 +140,13 @@ def test_assemble_scope_no_failover(
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
-        result = assemble_scope_state("10.20.30.0")
+        result = await assemble_scope_state("10.20.30.0")
 
     assert result.failover is None
 
 
-def test_assemble_scope_empty_exclusions(mock_ps_scope_raw, mock_ps_options_raw):
+@pytest.mark.asyncio
+async def test_assemble_scope_empty_exclusions(mock_ps_scope_raw, mock_ps_options_raw):
     def fake_run_ps(cmd, parse_json=True):
         if "Get-DhcpServerv4Scope" in cmd:
             return mock_ps_scope_raw
@@ -156,12 +159,13 @@ def test_assemble_scope_empty_exclusions(mock_ps_scope_raw, mock_ps_options_raw)
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
-        result = assemble_scope_state("10.20.30.0")
+        result = await assemble_scope_state("10.20.30.0")
 
     assert result.exclusions == []
 
 
-def test_exclusions_sorted_by_ip(mock_ps_scope_raw, mock_ps_options_raw):
+@pytest.mark.asyncio
+async def test_exclusions_sorted_by_ip(mock_ps_scope_raw, mock_ps_options_raw):
     """Exclusions must come out sorted by IP numeric order regardless of PS output order."""
     unsorted_exclusions = [
         {"StartRange": "10.20.30.201", "EndRange": "10.20.30.254"},
@@ -180,7 +184,7 @@ def test_exclusions_sorted_by_ip(mock_ps_scope_raw, mock_ps_options_raw):
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
-        result = assemble_scope_state("10.20.30.0")
+        result = await assemble_scope_state("10.20.30.0")
 
     assert str(result.exclusions[0].startAddress) == "10.20.30.1"
     assert str(result.exclusions[1].startAddress) == "10.20.30.201"

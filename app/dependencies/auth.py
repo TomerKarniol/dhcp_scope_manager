@@ -6,7 +6,7 @@ from app.config import settings
 from app.errors import UnauthorizedError
 
 
-def verify_token(authorization: str = Header(default="")) -> None:
+async def verify_token(authorization: str = Header(default="")) -> None:
     if not settings.DHCP_API_TOKEN:
         return
 

@@ -7,5 +7,5 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/healthz", status_code=status.HTTP_200_OK)
-def healthz(_: None = Depends(verify_token)):
-    return dhcp_service.check_health()
+async def healthz(_: None = Depends(verify_token)):
+    return await dhcp_service.check_health()

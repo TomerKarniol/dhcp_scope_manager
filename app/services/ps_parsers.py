@@ -52,17 +52,17 @@ def parse_failover(raw: dict) -> DhcpFailover:
     )
 
 
-def assemble_scope_state(scope_id: str) -> DhcpScopePayload:
+async def assemble_scope_state(scope_id: str) -> DhcpScopePayload:
     """Query Windows DHCP via PowerShell and assemble the canonical DhcpScopePayload.
 
     This is the single source of truth for GET responses. The output MUST be
     byte-for-byte comparable to the PUT/POST body Crossplane sends.
     """
     # 1. Scope basic info
-    scope = run_ps(f"Get-DhcpServerv4Scope -ScopeId {scope_id}")
+    scope = await run_ps(f"Get-DhcpServerv4Scope -ScopeId {scope_id}")
 
     # 2. Scope options (gateway, DNS, domain)
-    options_raw = run_ps(f"Get-DhcpServerv4OptionValue -ScopeId {scope_id}")
+    options_raw = await run_ps(f"Get-DhcpServerv4OptionValue -ScopeId {scope_id}")
     options = normalize_list(options_raw)
 
     # 3. Exclusion ranges
@@ -71,7 +71,7 @@ def assemble_scope_state(scope_id: str) -> DhcpScopePayload:
     # no exclusions would cause the next reconciliation to delete them from the server.
     exclusions_raw = None
     try:
-        exclusions_raw = run_ps(f"Get-DhcpServerv4ExclusionRange -ScopeId {scope_id}")
+        exclusions_raw = await run_ps(f"Get-DhcpServerv4ExclusionRange -ScopeId {scope_id}")
     except PowerShellError as exc:
         if not is_not_found_error(exc.stderr):
             raise
@@ -85,7 +85,7 @@ def assemble_scope_state(scope_id: str) -> DhcpScopePayload:
     # null failover would cause the next reconciliation to remove the relationship.
     failover_obj: DhcpFailover | None = None
     try:
-        failover_raw = run_ps(f"Get-DhcpServerv4Failover -ScopeId {scope_id}")
+        failover_raw = await run_ps(f"Get-DhcpServerv4Failover -ScopeId {scope_id}")
         if failover_raw:
             failover_obj = parse_failover(
                 failover_raw if isinstance(failover_raw, dict) else failover_raw[0]

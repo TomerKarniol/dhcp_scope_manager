@@ -30,7 +30,7 @@ Git (values files — desired state)
 ```text
 app/
   main.py                    FastAPI app bootstrap
-  config.py                  Env-based settings (DHCP_API_TOKEN, HOST, PORT, LOG_LEVEL)
+  config.py                  Env-based settings (auth, bind address, logging, PowerShell limits)
   logging_config.py          JSON structured logging
   errors.py                  Project error classes and stable machine-readable error codes
   exception_handlers.py      Global exception → standard JSON error response mapping
@@ -48,12 +48,13 @@ app/
     health.py                /healthz runtime capability check
   services/
     dhcp_env.py              Runtime guard (OS / PowerShell / DHCP cmdlets check)
-    ps_executor.py           PowerShell command runner with timeout/error handling
+    ps_executor.py           Async PowerShell command runner with timeout/error handling
     ps_parsers.py            Parse and normalize PowerShell JSON output
     scope_service.py         Core scope lifecycle logic (create / get / update / delete)
   utils/
-    decorators.py            Lightweight logging decorator for service calls
+    decorators.py            Async-aware lightweight logging decorator for service calls
     ip_utils.py              IP integer conversion and TimeSpan parsing helpers
+    locks.py                 Async per-scope lock manager for serialized mutations
 
 helm/hosted-cluster-integration/
   Chart.yaml
@@ -103,12 +104,15 @@ pip install -r requirements.txt
 
 ## Configuration
 
-| Variable         | Default   | Description                                                   |
-| ---------------- | --------- | ------------------------------------------------------------- |
-| `DHCP_API_TOKEN` | _(empty)_ | Bearer token for auth. When unset, auth is disabled entirely. |
-| `HOST`           | `0.0.0.0` | Bind address                                                  |
-| `PORT`           | `8080`    | Bind port                                                     |
-| `LOG_LEVEL`      | `INFO`    | Log level                                                     |
+| Variable                               | Default   | Description                                                   |
+| -------------------------------------- | --------- | ------------------------------------------------------------- |
+| `DHCP_API_TOKEN`                       | _(empty)_ | Bearer token for auth. When unset, auth is disabled entirely. |
+| `HOST`                                 | `0.0.0.0` | Bind address                                                  |
+| `PORT`                                 | `8080`    | Bind port                                                     |
+| `LOG_LEVEL`                            | `INFO`    | Log level                                                     |
+| `POWERSHELL_COMMAND_TIMEOUT_SECONDS`   | `60`      | Timeout for DHCP PowerShell operations.                       |
+| `POWERSHELL_ENV_CHECK_TIMEOUT_SECONDS` | `15`      | Timeout for PowerShell startup/cmdlet availability checks.    |
+| `POWERSHELL_MAX_CONCURRENCY`           | `5`       | Maximum concurrent PowerShell commands across all requests.   |
 
 A `.env` file in the repo root is also supported.
 
@@ -128,6 +132,18 @@ All `/api/v1/scopes*` endpoints share two implicit checks that run before the ha
 
 - **Auth** — rejects requests when `DHCP_API_TOKEN` is set and the token is missing or wrong. Returns `401`.
 - **Environment guard** — rejects requests when the host cannot execute DHCP automation (wrong OS, missing PowerShell, no DHCP cmdlets). Returns `503`.
+
+Scope APIs use a real async execution path:
+
+```text
+async FastAPI route
+  → async service function
+  → async PowerShell executor
+  → asyncio.create_subprocess_exec()
+  → awaited stdout/stderr result
+```
+
+PowerShell execution is globally bounded by `POWERSHELL_MAX_CONCURRENCY`. Mutating operations (`POST`, `PUT`, `DELETE`) also take an async per-scope lock, so two writes for `10.20.30.0` are serialized while writes for different scopes can run concurrently up to the global limit.
 
 ## Error Response Format
 

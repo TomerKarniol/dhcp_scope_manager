@@ -2,12 +2,34 @@
 import json
 from unittest.mock import patch
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.models import DhcpExclusion, DhcpScopePayload
 from app.services.ps_executor import PowerShellError
 
-client = TestClient(app, raise_server_exceptions=False)
+pytestmark = pytest.mark.asyncio
+
+
+class AsyncTestClient:
+    async def request(self, method: str, path: str, **kwargs):
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.request(method, path, **kwargs)
+
+    async def get(self, path: str, **kwargs):
+        return await self.request("GET", path, **kwargs)
+
+    async def post(self, path: str, **kwargs):
+        return await self.request("POST", path, **kwargs)
+
+    async def put(self, path: str, **kwargs):
+        return await self.request("PUT", path, **kwargs)
+
+    async def delete(self, path: str, **kwargs):
+        return await self.request("DELETE", path, **kwargs)
+
+
+client = AsyncTestClient()
 
 
 def _error(body):
@@ -41,22 +63,22 @@ def _make_scope(**overrides):
 # GET
 # ---------------------------------------------------------------------------
 
-def test_get_existing_scope():
+async def test_get_existing_scope():
     scope = _make_scope()
     with patch("app.services.scope_service.assemble_scope_state", return_value=scope):
-        r = client.get("/api/v1/scopes/10.20.30.0")
+        r = await client.get("/api/v1/scopes/10.20.30.0")
     assert r.status_code == 200
     data = r.json()
     assert data["network"] == "10.20.30.0"
     assert data["leaseDurationDays"] == 8
 
 
-def test_get_missing_scope():
+async def test_get_missing_scope():
     with patch(
         "app.services.scope_service.assemble_scope_state",
         side_effect=PowerShellError("Get-DhcpServerv4Scope", "No DHCP scope found", 1),
     ):
-        r = client.get("/api/v1/scopes/10.20.30.0")
+        r = await client.get("/api/v1/scopes/10.20.30.0")
     assert r.status_code == 404
     err = _error(r.json())
     assert err["code"] == "SCOPE_NOT_FOUND"
@@ -67,25 +89,25 @@ def test_get_missing_scope():
 # POST
 # ---------------------------------------------------------------------------
 
-def test_post_create_new_scope():
+async def test_post_create_new_scope():
     created = _make_scope()
     with patch("app.services.scope_service.create_scope", return_value=created):
-        r = client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
+        r = await client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
     assert r.status_code == 200
     assert r.json()["network"] == "10.20.30.0"
 
 
-def test_post_bare_scopes_route_not_found():
+async def test_post_bare_scopes_route_not_found():
     """POST /scopes (without scope_id) must not exist — all writes go through Git/Crossplane."""
-    r = client.post("/api/v1/scopes", json=_make_scope_dict())
+    r = await client.post("/api/v1/scopes", json=_make_scope_dict())
     assert r.status_code == 405  # Method Not Allowed — path exists (GET /scopes) but not POST
 
 
-def test_post_idempotent_existing():
+async def test_post_idempotent_existing():
     """POST on existing scope must return 200, never 409."""
     existing = _make_scope()
     with patch("app.services.scope_service.create_scope", return_value=existing):
-        r = client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
+        r = await client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
     assert r.status_code == 200
 
 
@@ -93,17 +115,17 @@ def test_post_idempotent_existing():
 # POST /scopes/{scope_id}  — Crossplane provider-http target
 # ---------------------------------------------------------------------------
 
-def test_post_by_scope_id_creates_scope():
+async def test_post_by_scope_id_creates_scope():
     """POST /scopes/{scope_id} is the actual URL Crossplane uses for create.
     It must behave identically to POST /scopes when path matches body.network."""
     created = _make_scope()
     with patch("app.services.scope_service.create_scope", return_value=created):
-        r = client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
+        r = await client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
     assert r.status_code == 200
     assert r.json()["network"] == "10.20.30.0"
 
 
-def test_post_by_scope_id_mismatch_returns_400():
+async def test_post_by_scope_id_mismatch_returns_400():
     """POST /scopes/{scope_id} must reject a body whose network != path scope_id.
 
     Without this check, Crossplane could POST to /scopes/10.20.30.0 with a body
@@ -126,23 +148,23 @@ def test_post_by_scope_id_mismatch_returns_400():
         "exclusions": [],
         "failover": None,
     }
-    r = client.post("/api/v1/scopes/10.20.30.0", json=body)
+    r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
     assert r.status_code == 400
     err = _error(r.json())
     assert err["code"] == "SCOPE_ID_MISMATCH"
     assert "does not match" in err["message"]
 
 
-def test_post_by_scope_id_invalid_scope_id_returns_400():
+async def test_post_by_scope_id_invalid_scope_id_returns_400():
     """POST /scopes/{scope_id} with malformed scope_id must return 400."""
-    r = client.post("/api/v1/scopes/10.20.999.0", json=_make_scope_dict())
+    r = await client.post("/api/v1/scopes/10.20.999.0", json=_make_scope_dict())
     assert r.status_code == 400
     err = _error(r.json())
     assert err["code"] == "INVALID_SCOPE_ID"
     assert "10.20.999.0" in err["message"]
 
 
-def test_post_by_scope_id_with_hotstandby_failover():
+async def test_post_by_scope_id_with_hotstandby_failover():
     """POST /scopes/{scope_id} with HotStandby failover delegates to same service function."""
     failover_dict = {
         "partnerServer": "dhcp02.lab.local",
@@ -157,7 +179,7 @@ def test_post_by_scope_id_with_hotstandby_failover():
     body = _make_scope_dict(failover=failover_dict)
     created = _make_scope(failover=DhcpScopePayload(**body).failover)
     with patch("app.services.scope_service.create_scope", return_value=created) as mock_create:
-        r = client.post("/api/v1/scopes/10.20.30.0", json=body)
+        r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
     assert r.status_code == 200
     mock_create.assert_called_once()
     called_payload = mock_create.call_args[0][0]
@@ -166,7 +188,7 @@ def test_post_by_scope_id_with_hotstandby_failover():
     assert called_payload.failover.serverRole == "Active"
 
 
-def test_post_by_scope_id_with_loadbalance_failover():
+async def test_post_by_scope_id_with_loadbalance_failover():
     """POST /scopes/{scope_id} with LoadBalance failover — serverRole must be normalised to Active."""
     failover_dict = {
         "partnerServer": "dhcp02.lab.local",
@@ -181,7 +203,7 @@ def test_post_by_scope_id_with_loadbalance_failover():
     f = DhcpFailover(**failover_dict)
     created = _make_scope(failover=f)
     with patch("app.services.scope_service.create_scope", return_value=created) as mock_create:
-        r = client.post("/api/v1/scopes/10.20.30.0", json=body)
+        r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
     assert r.status_code == 200
     mock_create.assert_called_once()
     called_payload = mock_create.call_args[0][0]
@@ -196,26 +218,26 @@ def test_post_by_scope_id_with_loadbalance_failover():
 # PUT
 # ---------------------------------------------------------------------------
 
-def test_put_update_scope():
+async def test_put_update_scope():
     updated = _make_scope(scopeName="Updated Name")
     with patch("app.services.scope_service.update_scope", return_value=updated):
-        r = client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict(scopeName="Updated Name"))
+        r = await client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict(scopeName="Updated Name"))
     assert r.status_code == 200
     assert r.json()["scopeName"] == "Updated Name"
 
 
-def test_put_scope_not_found():
+async def test_put_scope_not_found():
     from app.errors import ScopeNotFoundError
     with patch(
         "app.services.scope_service.update_scope",
         side_effect=ScopeNotFoundError("10.20.30.0"),
     ):
-        r = client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
+        r = await client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
     assert r.status_code == 404
     assert _error(r.json())["code"] == "SCOPE_NOT_FOUND"
 
 
-def test_put_scope_path_body_network_mismatch_returns_400():
+async def test_put_scope_path_body_network_mismatch_returns_400():
     """PUT must reject requests where path scope_id != body network.
 
     Without this check, a Crossplane PUT to /scopes/10.20.30.0 with a body describing
@@ -238,18 +260,18 @@ def test_put_scope_path_body_network_mismatch_returns_400():
         "exclusions": [],
         "failover": None,
     }
-    r = client.put("/api/v1/scopes/10.20.30.0", json=body)
+    r = await client.put("/api/v1/scopes/10.20.30.0", json=body)
     assert r.status_code == 400
     err = _error(r.json())
     assert err["code"] == "SCOPE_ID_MISMATCH"
     assert "does not match" in err["message"]
 
 
-def test_put_scope_path_body_network_match_passes():
+async def test_put_scope_path_body_network_match_passes():
     """PUT succeeds when path scope_id matches body network field."""
     updated = _make_scope()
     with patch("app.services.scope_service.update_scope", return_value=updated):
-        r = client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict(network="10.20.30.0"))
+        r = await client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict(network="10.20.30.0"))
     assert r.status_code == 200
 
 
@@ -257,21 +279,21 @@ def test_put_scope_path_body_network_match_passes():
 # DELETE
 # ---------------------------------------------------------------------------
 
-def test_delete_scope():
+async def test_delete_scope():
     with patch("app.services.scope_service.delete_scope", return_value=None):
-        r = client.delete("/api/v1/scopes/10.20.30.0")
+        r = await client.delete("/api/v1/scopes/10.20.30.0")
     assert r.status_code == 204
     assert r.content == b""
 
 
-def test_delete_idempotent():
+async def test_delete_idempotent():
     """DELETE on non-existent scope must return 204."""
     with patch("app.services.scope_service.delete_scope", return_value=None):
-        r = client.delete("/api/v1/scopes/10.99.99.99")
+        r = await client.delete("/api/v1/scopes/10.99.99.99")
     assert r.status_code == 204
 
 
-def test_delete_ps_error_during_assembly_returns_500():
+async def test_delete_ps_error_during_assembly_returns_500():
     """Unexpected PowerShell failure during delete scope assembly must return 500, not 204.
 
     If _try_assemble_scope raises for a non-not-found reason (e.g. permission denied),
@@ -282,7 +304,7 @@ def test_delete_ps_error_during_assembly_returns_500():
     with patch("app.services.scope_service.scope_exists", return_value=True), \
          patch("app.services.scope_service.assemble_scope_state",
                side_effect=PowerShellError("Get-DhcpServerv4Scope", "Access denied", 5)):
-        r = client.delete("/api/v1/scopes/10.20.30.0")
+        r = await client.delete("/api/v1/scopes/10.20.30.0")
     assert r.status_code == 500
     err = _error(r.json())
     assert err["code"] == "POWERSHELL_COMMAND_FAILED"
@@ -293,12 +315,12 @@ def test_delete_ps_error_during_assembly_returns_500():
 # Error handling
 # ---------------------------------------------------------------------------
 
-def test_powershell_error_500():
+async def test_powershell_error_500():
     with patch(
         "app.services.scope_service.create_scope",
         side_effect=PowerShellError("Add-DhcpServerv4Scope", "Access denied", 1),
     ):
-        r = client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
+        r = await client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
     assert r.status_code == 500
     body = r.json()
     err = _error(body)
@@ -306,37 +328,37 @@ def test_powershell_error_500():
     assert err["message"] == "Failed to apply DHCP scope configuration"
 
 
-def test_powershell_timeout_returns_504():
+async def test_powershell_timeout_returns_504():
     with patch(
         "app.services.scope_service.create_scope",
         side_effect=PowerShellError("Set-DhcpServerv4Scope", "PowerShell command timed out after 60 seconds", -1),
     ):
-        r = client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
+        r = await client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
     assert r.status_code == 504
     assert _error(r.json())["code"] == "POWERSHELL_TIMEOUT"
 
 
-def test_powershell_already_exists_unhandled_returns_409():
+async def test_powershell_already_exists_unhandled_returns_409():
     with patch(
         "app.services.scope_service.update_scope",
         side_effect=PowerShellError("Add-DhcpServerv4Failover", "relationship already exists", 1),
     ):
-        r = client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
+        r = await client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
     assert r.status_code == 409
     assert _error(r.json())["code"] == "DHCP_CONFLICT"
 
 
-def test_unexpected_exception_returns_standard_500():
+async def test_unexpected_exception_returns_standard_500():
     with patch("app.services.scope_service.list_scopes", side_effect=TypeError("boom")):
-        r = client.get("/api/v1/scopes")
+        r = await client.get("/api/v1/scopes")
     assert r.status_code == 500
     err = _error(r.json())
     assert err["code"] == "INTERNAL_ERROR"
     assert err["message"] == "Internal server error"
 
 
-def test_method_not_allowed_uses_standard_error_shape():
-    r = client.post("/api/v1/scopes", json=_make_scope_dict())
+async def test_method_not_allowed_uses_standard_error_shape():
+    r = await client.post("/api/v1/scopes", json=_make_scope_dict())
     assert r.status_code == 405
     assert _error(r.json())["code"] == "METHOD_NOT_ALLOWED"
 
@@ -345,12 +367,12 @@ def test_method_not_allowed_uses_standard_error_shape():
 # Auth
 # ---------------------------------------------------------------------------
 
-def test_auth_required_when_token_set():
+async def test_auth_required_when_token_set():
     import app.dependencies.auth as auth_mod
     original = auth_mod.settings.DHCP_API_TOKEN
     auth_mod.settings.DHCP_API_TOKEN = "secret-token"
     try:
-        r = client.get("/api/v1/scopes/10.20.30.0")
+        r = await client.get("/api/v1/scopes/10.20.30.0")
         assert r.status_code == 401
         err = _error(r.json())
         assert err["code"] == "UNAUTHORIZED"
@@ -359,12 +381,12 @@ def test_auth_required_when_token_set():
         auth_mod.settings.DHCP_API_TOKEN = original
 
 
-def test_auth_rejects_wrong_bearer_token():
+async def test_auth_rejects_wrong_bearer_token():
     import app.dependencies.auth as auth_mod
     original = auth_mod.settings.DHCP_API_TOKEN
     auth_mod.settings.DHCP_API_TOKEN = "secret-token"
     try:
-        r = client.get(
+        r = await client.get(
             "/api/v1/scopes/10.20.30.0",
             headers={"Authorization": "Bearer wrong-token"},
         )
@@ -374,27 +396,27 @@ def test_auth_rejects_wrong_bearer_token():
         auth_mod.settings.DHCP_API_TOKEN = original
 
 
-def test_auth_disabled_when_token_empty():
+async def test_auth_disabled_when_token_empty():
     import app.dependencies.auth as auth_mod
     scope = _make_scope()
     original = auth_mod.settings.DHCP_API_TOKEN
     auth_mod.settings.DHCP_API_TOKEN = ""
     try:
         with patch("app.services.scope_service.assemble_scope_state", return_value=scope):
-            r = client.get("/api/v1/scopes/10.20.30.0")
+            r = await client.get("/api/v1/scopes/10.20.30.0")
         assert r.status_code == 200
     finally:
         auth_mod.settings.DHCP_API_TOKEN = original
 
 
-def test_auth_passes_with_correct_token():
+async def test_auth_passes_with_correct_token():
     import app.dependencies.auth as auth_mod
     scope = _make_scope()
     original = auth_mod.settings.DHCP_API_TOKEN
     auth_mod.settings.DHCP_API_TOKEN = "secret-token"
     try:
         with patch("app.services.scope_service.assemble_scope_state", return_value=scope):
-            r = client.get(
+            r = await client.get(
                 "/api/v1/scopes/10.20.30.0",
                 headers={"Authorization": "Bearer secret-token"},
             )
@@ -407,9 +429,9 @@ def test_auth_passes_with_correct_token():
 # Health check
 # ---------------------------------------------------------------------------
 
-def test_healthz_endpoint():
+async def test_healthz_endpoint():
     with patch("app.services.dhcp_service.validate_dhcp_environment"):
-        r = client.get("/healthz")
+        r = await client.get("/healthz")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
 
@@ -418,22 +440,22 @@ def test_healthz_endpoint():
 # Critical: GET/PUT roundtrip test
 # ---------------------------------------------------------------------------
 
-def test_invalid_scope_id_returns_400():
-    r = client.get("/api/v1/scopes/10.20.999.0")
+async def test_invalid_scope_id_returns_400():
+    r = await client.get("/api/v1/scopes/10.20.999.0")
     assert r.status_code == 400
     assert _error(r.json())["code"] == "INVALID_SCOPE_ID"
 
 
-def test_invalid_scope_id_not_ip_returns_422():
+async def test_invalid_scope_id_not_ip_returns_422():
     # Pattern validation on the path param catches non-IP strings before our validator
-    r = client.get("/api/v1/scopes/not-an-ip")
+    r = await client.get("/api/v1/scopes/not-an-ip")
     assert r.status_code == 400
     assert _error(r.json())["code"] == "INVALID_SCOPE_ID"
 
 
-def test_invalid_request_body_returns_standard_validation_error():
+async def test_invalid_request_body_returns_standard_validation_error():
     body = _make_scope_dict(startRange="not-an-ip")
-    r = client.post("/api/v1/scopes/10.20.30.0", json=body)
+    r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
     assert r.status_code == 422
     err = _error(r.json())
     assert err["code"] == "VALIDATION_ERROR"
@@ -441,9 +463,9 @@ def test_invalid_request_body_returns_standard_validation_error():
     assert any(e["field"] == "body.startRange" for e in err["details"]["errors"])
 
 
-def test_invalid_subnet_relationship_returns_validation_error():
+async def test_invalid_subnet_relationship_returns_validation_error():
     body = _make_scope_dict(startRange="10.20.31.100", endRange="10.20.31.200")
-    r = client.post("/api/v1/scopes/10.20.30.0", json=body)
+    r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
     assert r.status_code == 422
     err = _error(r.json())
     assert err["code"] == "VALIDATION_ERROR"
@@ -454,19 +476,19 @@ def test_invalid_subnet_relationship_returns_validation_error():
 # GET /scopes — list all scopes
 # ---------------------------------------------------------------------------
 
-def test_list_scopes_empty():
+async def test_list_scopes_empty():
     """Empty DHCP server must return 200 with an empty list."""
     with patch("app.services.scope_service.list_scopes", return_value=[]):
-        r = client.get("/api/v1/scopes")
+        r = await client.get("/api/v1/scopes")
     assert r.status_code == 200
     assert r.json() == []
 
 
-def test_list_scopes_single():
+async def test_list_scopes_single():
     """Single scope is returned as a one-element list with the canonical shape."""
     scope = _make_scope()
     with patch("app.services.scope_service.list_scopes", return_value=[scope]):
-        r = client.get("/api/v1/scopes")
+        r = await client.get("/api/v1/scopes")
     assert r.status_code == 200
     data = r.json()
     assert len(data) == 1
@@ -477,7 +499,7 @@ def test_list_scopes_single():
         assert field in data[0], f"canonical field '{field}' missing from list item"
 
 
-def test_list_scopes_multiple():
+async def test_list_scopes_multiple():
     """Multiple scopes are returned and the list has the expected length."""
     scope_a = DhcpScopePayload(
         scopeName="Scope-A", network="10.20.30.0", subnetMask="255.255.255.0",
@@ -492,24 +514,25 @@ def test_list_scopes_multiple():
         exclusions=[], failover=None,
     )
     with patch("app.services.scope_service.list_scopes", return_value=[scope_a, scope_b]):
-        r = client.get("/api/v1/scopes")
+        r = await client.get("/api/v1/scopes")
     assert r.status_code == 200
     assert len(r.json()) == 2
 
 
-def test_list_scopes_ps_error_returns_500():
+async def test_list_scopes_ps_error_returns_500():
     """PowerShell failure during list must return the standard safe 500 shape."""
     with patch(
         "app.services.scope_service.list_scopes",
         side_effect=PowerShellError("Get-DhcpServerv4Scope", "Access denied", 1),
     ):
-        r = client.get("/api/v1/scopes")
+        r = await client.get("/api/v1/scopes")
     assert r.status_code == 500
     body = r.json()
     assert _error(body)["code"] == "POWERSHELL_COMMAND_FAILED"
 
 
-def test_list_scopes_sorted_numerically():
+@pytest.mark.asyncio
+async def test_list_scopes_sorted_numerically():
     """Scopes must be sorted numerically by network address regardless of PS return order."""
     from app.services.scope_service import list_scopes as svc_list_scopes
 
@@ -534,14 +557,14 @@ def test_list_scopes_sorted_numerically():
 
     with patch("app.services.scope_service.run_ps", return_value=raw_list), \
          patch("app.services.scope_service.assemble_scope_state", side_effect=fake_assemble):
-        result = svc_list_scopes()
+        result = await svc_list_scopes()
 
     assert len(result) == 2
     assert str(result[0].network) == "10.20.9.0",  "10.20.9.0 must sort before 10.20.30.0 numerically"
     assert str(result[1].network) == "10.20.30.0"
 
 
-def test_list_scopes_item_shape_matches_single_scope_get(
+async def test_list_scopes_item_shape_matches_single_scope_get(
     mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw
 ):
     """Each item from GET /scopes must be byte-for-byte identical to GET /scopes/{scope_id}."""
@@ -563,8 +586,8 @@ def test_list_scopes_item_shape_matches_single_scope_get(
 
     with patch("app.services.scope_service.run_ps", side_effect=fake_run_ps), \
          patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
-        list_r = client.get("/api/v1/scopes")
-        single_r = client.get("/api/v1/scopes/10.20.30.0")
+        list_r = await client.get("/api/v1/scopes")
+        single_r = await client.get("/api/v1/scopes/10.20.30.0")
 
     assert list_r.status_code == 200
     assert single_r.status_code == 200
@@ -578,7 +601,7 @@ def test_list_scopes_item_shape_matches_single_scope_get(
     )
 
 
-def test_list_scopes_failover_null_consistent(
+async def test_list_scopes_failover_null_consistent(
     mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw
 ):
     """failover: null in list items must match failover: null in single-scope GET."""
@@ -599,7 +622,7 @@ def test_list_scopes_failover_null_consistent(
 
     with patch("app.services.scope_service.run_ps", side_effect=fake_run_ps), \
          patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
-        list_r = client.get("/api/v1/scopes")
+        list_r = await client.get("/api/v1/scopes")
 
     assert list_r.status_code == 200
     item = list_r.json()[0]
@@ -611,7 +634,8 @@ def test_list_scopes_failover_null_consistent(
 # Critical: GET/PUT roundtrip test
 # ---------------------------------------------------------------------------
 
-def test_get_put_roundtrip(
+@pytest.mark.asyncio
+async def test_get_put_roundtrip(
     mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw
 ):
     """
@@ -654,7 +678,7 @@ def test_get_put_roundtrip(
         return None
 
     with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
-        get_payload = real_assemble("10.20.30.0")
+        get_payload = await real_assemble("10.20.30.0")
     get_json = get_payload.model_dump(mode="json")
 
     # Must be byte-for-byte identical — no sort_keys so field order matters too

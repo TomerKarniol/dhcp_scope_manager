@@ -9,7 +9,7 @@ from app.errors import InvalidScopeIdError, ScopeIdMismatchError
 from app.models import DhcpScopePayload
 
 
-def validate_scope_id(scope_id: str) -> str:
+async def validate_scope_id(scope_id: str) -> str:
     try:
         IPv4Address(scope_id)
     except (AddressValueError, ValueError):
@@ -17,7 +17,7 @@ def validate_scope_id(scope_id: str) -> str:
     return scope_id
 
 
-def validate_scope_request(
+async def validate_scope_request(
     payload: Annotated[DhcpScopePayload, Body(...)],
     scope_id: str = Depends(validate_scope_id),
 ) -> tuple[str, DhcpScopePayload]:

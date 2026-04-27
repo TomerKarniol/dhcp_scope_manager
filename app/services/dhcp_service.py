@@ -8,7 +8,7 @@ needs ad-hoc environment awareness:
   2. PowerShell availability — powershell.exe exists and can execute.
   3. DHCP cmdlet availability — the DhcpServer module cmdlets are discoverable.
 
-Results are cached after the first call (thread-safe). Callers only pay the
+Results are cached after the first call (async-safe). Callers only pay the
 subprocess cost once per process lifetime.
 
 For testing, call _reset_validation_cache() to clear the cache between tests.
@@ -19,10 +19,10 @@ import logging
 import os
 import platform
 import shutil
-import subprocess
-import threading
+import asyncio
 import time
 
+from app.config import settings
 from app.utils.decorators import log_call
 
 logger = logging.getLogger(__name__)
@@ -56,10 +56,11 @@ class DhcpEnvironmentError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Module-level validation cache  (thread-safe, set once per process)
+# Module-level validation cache  (async-safe, set once per process)
 # ---------------------------------------------------------------------------
 
-_cache_lock = threading.Lock()
+_cache_lock: asyncio.Lock | None = None
+_cache_lock_loop: asyncio.AbstractEventLoop | None = None
 _cache_ok: bool | None = None
 _cache_exc: DhcpEnvironmentError | None = None
 _cache_negative_until: float = 0.0
@@ -69,13 +70,22 @@ _cache_negative_until: float = 0.0
 _NEGATIVE_CACHE_TTL_SECS: float = 30.0
 
 
+def _get_cache_lock() -> asyncio.Lock:
+    global _cache_lock, _cache_lock_loop
+
+    loop = asyncio.get_running_loop()
+    if _cache_lock is None or _cache_lock_loop is not loop:
+        _cache_lock = asyncio.Lock()
+        _cache_lock_loop = loop
+    return _cache_lock
+
+
 def _reset_validation_cache() -> None:
     """Reset the cached validation result.  For testing only."""
     global _cache_ok, _cache_exc, _cache_negative_until
-    with _cache_lock:
-        _cache_ok = None
-        _cache_exc = None
-        _cache_negative_until = 0.0
+    _cache_ok = None
+    _cache_exc = None
+    _cache_negative_until = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +140,32 @@ def _check_os() -> None:
         )
 
 
-def _check_powershell_binary() -> None:
+async def _run_powershell_check(command: str, timeout_seconds: int) -> tuple[int, str]:
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+
+    return process.returncode or 0, stderr.decode(errors="replace")
+
+
+async def _check_powershell_binary() -> None:
     """Raise DhcpEnvironmentError if powershell.exe is missing or cannot execute.
 
     Requires Windows PowerShell (powershell.exe), not PowerShell 7 (pwsh.exe).
@@ -146,28 +181,26 @@ def _check_powershell_binary() -> None:
         )
 
     try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", "exit 0"],
-            capture_output=True,
-            text=True,
-            timeout=15,
+        returncode, stderr = await _run_powershell_check(
+            "exit 0",
+            settings.POWERSHELL_ENV_CHECK_TIMEOUT_SECONDS,
         )
-    except subprocess.TimeoutExpired:
+    except asyncio.TimeoutError:
         raise DhcpEnvironmentError(
             DhcpEnvReason.POWERSHELL_EXEC_FAILED,
             f"Windows PowerShell found at {ps_path!r} but timed out during startup check. "
             "PowerShell may be hung or system resources exhausted.",
         )
-    if result.returncode != 0:
+    if returncode != 0:
         raise DhcpEnvironmentError(
             DhcpEnvReason.POWERSHELL_EXEC_FAILED,
             f"Windows PowerShell found at {ps_path!r} but failed to execute "
-            f"(rc={result.returncode}). "
-            f"stderr: {result.stderr.strip()!r}",
+            f"(rc={returncode}). "
+            f"stderr: {stderr.strip()!r}",
         )
 
 
-def _check_dhcp_cmdlets() -> None:
+async def _check_dhcp_cmdlets() -> None:
     """Raise DhcpEnvironmentError if the required DHCP cmdlets are not available.
 
     Uses Get-Command to check whether Get-DhcpServerv4Scope is discoverable.
@@ -182,25 +215,17 @@ def _check_dhcp_cmdlets() -> None:
     This check runs fully local — no network access, no DHCP server required.
     """
     try:
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Get-Command Get-DhcpServerv4Scope -ErrorAction Stop | Out-Null",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
+        returncode, _stderr = await _run_powershell_check(
+            "Get-Command Get-DhcpServerv4Scope -ErrorAction Stop | Out-Null",
+            settings.POWERSHELL_ENV_CHECK_TIMEOUT_SECONDS,
         )
-    except subprocess.TimeoutExpired:
+    except asyncio.TimeoutError:
         raise DhcpEnvironmentError(
             DhcpEnvReason.POWERSHELL_EXEC_FAILED,
             "Timed out while checking for DHCP PowerShell cmdlets. "
             "PowerShell may be hung or system resources exhausted.",
         )
-    if result.returncode != 0:
+    if returncode != 0:
         raise DhcpEnvironmentError(
             DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE,
             "DHCP PowerShell cmdlets are not available on this machine. "
@@ -216,7 +241,7 @@ def _check_dhcp_cmdlets() -> None:
 # Public validator
 # ---------------------------------------------------------------------------
 
-def validate_dhcp_environment() -> None:
+async def validate_dhcp_environment() -> None:
     """Validate that this runtime can perform DHCP automation via Windows PowerShell.
 
     Checks (in order):
@@ -224,7 +249,7 @@ def validate_dhcp_environment() -> None:
       2. powershell.exe present and executable.
       3. Get-DhcpServerv4Scope discoverable (DhcpServer module available).
 
-    Thread-safe. Results are cached after the first call; subsequent calls return
+    Async-safe. Results are cached after the first call; subsequent calls return
     immediately from cache.  A failed environment is cached and will fail every
     future call until the process restarts.
 
@@ -233,7 +258,7 @@ def validate_dhcp_environment() -> None:
     """
     global _cache_ok, _cache_exc, _cache_negative_until
 
-    with _cache_lock:
+    async with _get_cache_lock():
         if _cache_ok is True:
             return
         if _cache_exc is not None:
@@ -245,12 +270,12 @@ def validate_dhcp_environment() -> None:
             _cache_exc = None
             _cache_ok = None
 
-        # Run all checks inside the lock — prevents duplicate subprocess calls
-        # under concurrent requests.  Subprocess timeout budget: 3 × 15s = 45s max.
+        # Run all checks inside the lock to prevent duplicate PowerShell checks
+        # under concurrent startup traffic.
         try:
             _check_os()
-            _check_powershell_binary()
-            _check_dhcp_cmdlets()
+            await _check_powershell_binary()
+            await _check_dhcp_cmdlets()
         except DhcpEnvironmentError as exc:
             logger.error(
                 "DHCP environment validation failed [%s]: %s", exc.reason, exc.detail
@@ -266,6 +291,6 @@ def validate_dhcp_environment() -> None:
 
 
 @log_call
-def check_health() -> dict:
-    validate_dhcp_environment()
+async def check_health() -> dict:
+    await validate_dhcp_environment()
     return {"status": "ok"}

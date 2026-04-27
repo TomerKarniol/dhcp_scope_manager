@@ -11,7 +11,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.errors import AppError, ErrorCode
 from app.services.dhcp_service import DhcpEnvironmentError, DhcpEnvReason
-from app.services.ps_executor import PowerShellError, redact_powershell_command
+from app.services.ps_executor import (
+    PowerShellError,
+    PowerShellTimeoutError,
+    redact_powershell_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +192,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             exc_info=True,
         )
 
-        if exc.returncode == -1:
+        if isinstance(exc, PowerShellTimeoutError) or exc.returncode == -1:
             return _error_response(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 code=ErrorCode.POWERSHELL_TIMEOUT,
