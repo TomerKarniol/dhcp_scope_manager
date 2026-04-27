@@ -47,9 +47,9 @@ app/
     scopes.py                DHCP scope endpoints (POST/GET/PUT/DELETE /api/v1/scopes/{scope_id})
     health.py                /healthz runtime capability check
   services/
-    dhcp_env.py              Runtime guard (OS / PowerShell / DHCP cmdlets check)
+    dhcp_service.py          Runtime guard (OS / PowerShell / DHCP cmdlets check)
     ps_executor.py           Async PowerShell command runner with timeout/error handling
-    ps_parsers.py            Parse and normalize PowerShell JSON output
+    ps_parsers.py            Single-process GET script builder and PowerShell JSON normalization
     scope_service.py         Core scope lifecycle logic (create / get / update / delete)
   utils/
     decorators.py            Async-aware lightweight logging decorator for service calls
@@ -71,14 +71,21 @@ scripts/
 
 tests/
   conftest.py
+  test_async_runtime.py      Async subprocess execution, locks, timeout, and concurrency basics
+  test_concurrency_stress.py High-concurrency observe/write workload behavior
+  test_decorators_and_locks.py  log_call and ScopeLockManager unit tests
   test_endpoints.py          HTTP endpoint contracts and status codes
   test_models.py             Pydantic field ordering and serialization
   test_validation.py         IP validation, subnet consistency, failover mode enforcement
-  test_parsers.py            PowerShell output parsing and normalization
+  test_parsers.py            Single-process GET parsing, normalization, and injection safety
+  test_ps_executor_unit.py   Focused ps_executor command construction and sanitization tests
   test_diff.py               Diff-based update logic
-  test_dhcp_env.py           Runtime environment guard behavior
+  test_dhcp_service.py       Runtime environment guard behavior
   test_parity.py             GET/PUT parity — the main guard against Crossplane reconciliation loops
   test_edge_cases.py         Edge cases and boundary conditions
+  test_helm.py               Helm-rendered Crossplane Request contract
+  test_security.py           PowerShell escaping, response sanitization, and secret redaction
+  test_service_unit.py       Focused scope_service create/get/delete/list behavior
 ```
 
 ## Runtime Requirements
@@ -144,6 +151,39 @@ async FastAPI route
 ```
 
 PowerShell execution is globally bounded by `POWERSHELL_MAX_CONCURRENCY`. Mutating operations (`POST`, `PUT`, `DELETE`) also take an async per-scope lock, so two writes for `10.20.30.0` are serialized while writes for different scopes can run concurrently up to the global limit.
+
+### GET Read Path
+
+`GET /api/v1/scopes/{scope_id}` assembles the canonical `DhcpScopePayload` with one PowerShell process.
+
+The backend builds a single script that runs the required DHCP cmdlets in-process:
+
+1. `Get-DhcpServerv4Scope -ScopeId ...`
+2. `Get-DhcpServerv4OptionValue -ScopeId ...`
+3. `Get-DhcpServerv4ExclusionRange -ScopeId ...`
+4. `Get-DhcpServerv4Failover -ScopeId ...`
+
+The script emits one compressed JSON object:
+
+```json
+{
+  "scope": {},
+  "options": [],
+  "exclusions": [],
+  "failover": null
+}
+```
+
+`options` and `exclusions` are array-wrapped in PowerShell so single-result output does not collapse into an object. The script uses `ConvertTo-Json -Depth 10 -Compress` to avoid nested object truncation.
+
+Optional object behavior is deliberate:
+
+- Missing scope is an error and becomes the normal `404 SCOPE_NOT_FOUND` path.
+- Missing exclusions are normal and become `exclusions: []`.
+- Missing failover is normal and becomes `failover: null`.
+- Any other exclusion/failover failure is re-thrown so permission errors, DHCP server issues, or PowerShell crashes do not get hidden as empty state.
+
+`scope_id` is validated as an IPv4 address before the script is built and is inserted through a central PowerShell single-quote literal helper.
 
 ## Error Response Format
 
@@ -236,6 +276,8 @@ Creates the scope if it does not exist, then converges all options, exclusions, 
 
 Returns the current canonical state of the scope. When Crossplane sees a `404` here it issues `POST` to create the scope.
 
+This endpoint uses the optimized single-process GET read path described above, so one Crossplane observe spawns one PowerShell process for the scope state assembly.
+
 | Status | Body                                                    | When                                                       |
 | ------ | ------------------------------------------------------- | ---------------------------------------------------------- |
 | `200`  | `DhcpScopePayload`                                      | Scope found                                                |
@@ -307,6 +349,8 @@ Checks that the runtime environment can execute DHCP automation:
 3. DHCP cmdlets available (`Get-DhcpServerv4Scope` discoverable)
 
 Protected by auth (like all endpoints). Does **not** check the DHCP environment dependency before running — it is the check itself, so it always returns a structured response rather than a plain 503.
+
+Environment validation is async-safe and cached per process. A successful check is cached for the process lifetime, so repeated requests do not re-run the PowerShell environment checks. Failed checks are cached briefly and retried after the negative-cache TTL so transient PowerShell startup failures can recover without restarting the backend.
 
 | Status | Body                                                    | When                        |
 | ------ | ------------------------------------------------------- | --------------------------- |
@@ -481,17 +525,22 @@ Crossplane-specific behavior:
 ## Testing
 
 ```bash
-pytest
+.venv/bin/python -m pytest -v
 ```
 
 Test coverage includes:
 
 - Endpoint contracts and HTTP status codes
+- Async runtime behavior, subprocess timeout handling, and concurrency limits
 - Pydantic schema validation (IPs, subnet consistency, range ordering, failover mode enforcement)
-- PowerShell output parsing and normalization
+- Single-process GET script construction, PowerShell output parsing, and normalization
 - Diff-based update semantics (only changed sections trigger cmdlets)
 - Runtime environment guard behavior
 - GET/PUT parity contract — the main guard against Crossplane reconciliation loops
+- Helm-rendered Crossplane Request contract
+- Security checks for PowerShell escaping, response sanitization, and secret redaction
+
+The full suite currently contains 443 tests. The repository virtualenv is preferred because the system Python may not have runtime dependencies such as `pydantic-settings` installed.
 
 ## Operational Notes
 
