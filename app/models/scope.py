@@ -3,6 +3,8 @@ from ipaddress import IPv4Address, IPv4Network
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.utils.ip_utils import ip_to_int
+
 from app.models.exclusion import DhcpExclusion
 from app.models.failover import DhcpFailover
 
@@ -50,6 +52,14 @@ class DhcpScopePayload(BaseModel):
         max_length=1024,
         description="Optional scope description",
     )
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def normalize_description(cls, v: object) -> object:
+        """Normalize null/None to '' — prevents Crossplane drift when description is unset."""
+        if v is None:
+            return ""
+        return v
     gateway: IPv4Address = Field(
         description="Default gateway sent to clients (DHCP option 3)",
         examples=["10.20.30.1"],
@@ -84,6 +94,24 @@ class DhcpScopePayload(BaseModel):
                     f"exclusions[{i}] {excl.startAddress}-{excl.endAddress} is a duplicate"
                 )
             seen.add(key)
+        return self
+
+    @model_validator(mode="after")
+    def no_overlapping_exclusions(self) -> "DhcpScopePayload":
+        if len(self.exclusions) < 2:
+            return self
+        sorted_excl = sorted(
+            self.exclusions,
+            key=lambda x: (ip_to_int(x.startAddress), ip_to_int(x.endAddress)),
+        )
+        for i in range(len(sorted_excl) - 1):
+            a = sorted_excl[i]
+            b = sorted_excl[i + 1]
+            if ip_to_int(a.endAddress) >= ip_to_int(b.startAddress):
+                raise ValueError(
+                    f"exclusions overlap: {a.startAddress}-{a.endAddress} "
+                    f"overlaps with {b.startAddress}-{b.endAddress}"
+                )
         return self
 
     @model_validator(mode="after")

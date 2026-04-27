@@ -225,9 +225,10 @@ class TestRemoveScopeFromFailoverListReturn:
 # ---------------------------------------------------------------------------
 
 class TestExclusionSortDeterminism:
-    def test_exclusions_sorted_by_start_then_end(self):
-        """Two exclusions with the same startAddress must be sorted by endAddress."""
+    def test_exclusions_sorted_by_start_ascending(self):
+        """PS may return exclusions in any order; assemble_scope_state must sort them ascending."""
         from app.services.ps_parsers import assemble_scope_state
+        from app.services.ps_executor import PowerShellError as PSError
 
         scope_data = {
             "Name": "Test", "SubnetMask": "255.255.255.0",
@@ -239,22 +240,19 @@ class TestExclusionSortDeterminism:
             {"OptionId": 6, "Value": ["10.0.0.53"]},
             {"OptionId": 15, "Value": ["lab.local"]},
         ]
-        # Two exclusions with same start, different end — should be sorted by end
+        # PS returns them in reverse IP order
         excl_data = [
-            {"StartRange": "10.20.30.1", "EndRange": "10.20.30.50"},
-            {"StartRange": "10.20.30.1", "EndRange": "10.20.30.10"},
+            {"StartRange": "10.20.30.51", "EndRange": "10.20.30.60"},  # higher IP first
+            {"StartRange": "10.20.30.1", "EndRange": "10.20.30.10"},   # lower IP second
         ]
 
         with patch("app.services.ps_parsers.run_ps") as mock_ps:
-            mock_ps.side_effect = [scope_data, options_data, excl_data, None]
-            # Failover raises PowerShellError to simulate no failover
-            from app.services.ps_executor import PowerShellError as PSError
             mock_ps.side_effect = [scope_data, options_data, excl_data, PSError("failover", "not found", 1)]
             result = assemble_scope_state("10.20.30.0")
 
         assert len(result.exclusions) == 2
-        assert str(result.exclusions[0].endAddress) == "10.20.30.10"
-        assert str(result.exclusions[1].endAddress) == "10.20.30.50"
+        assert str(result.exclusions[0].startAddress) == "10.20.30.1"
+        assert str(result.exclusions[1].startAddress) == "10.20.30.51"
 
     def test_exclusions_sorted_by_start_primarily(self):
         """Primary sort key is startAddress."""
@@ -334,13 +332,14 @@ class TestDuplicateExclusionValidation:
                 DhcpExclusion(startAddress="10.20.30.1", endAddress="10.20.30.10"),
             ])
 
-    def test_overlapping_but_not_identical_exclusions_accepted(self):
-        """Different exclusion ranges (even overlapping) are not duplicates."""
-        scope = _make_scope(exclusions=[
-            DhcpExclusion(startAddress="10.20.30.1", endAddress="10.20.30.10"),
-            DhcpExclusion(startAddress="10.20.30.1", endAddress="10.20.30.20"),  # same start, different end
-        ])
-        assert len(scope.exclusions) == 2
+    def test_overlapping_exclusions_rejected(self):
+        """Overlapping exclusion ranges must be rejected (even if not identical)."""
+        with pytest.raises(ValidationError) as exc_info:
+            _make_scope(exclusions=[
+                DhcpExclusion(startAddress="10.20.30.1", endAddress="10.20.30.20"),
+                DhcpExclusion(startAddress="10.20.30.10", endAddress="10.20.30.30"),
+            ])
+        assert "overlap" in str(exc_info.value).lower()
 
     def test_single_exclusion_accepted(self):
         scope = _make_scope(exclusions=[

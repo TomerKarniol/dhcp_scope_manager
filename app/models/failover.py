@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Literal, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DhcpFailover(BaseModel):
@@ -52,11 +52,18 @@ class DhcpFailover(BaseModel):
     )
     sharedSecret: Optional[str] = Field(
         default=None,
-        min_length=1,
         max_length=256,
         description="Shared secret for failover authentication. null = no authentication. "
-                    "Empty string is not valid; use null to indicate no authentication.",
+                    "Empty string is normalized to null.",
     )
+
+    @field_validator("sharedSecret", mode="before")
+    @classmethod
+    def normalize_shared_secret(cls, v: object) -> object:
+        """Normalize empty string to null — allows sharedSecret: '' in values.yaml."""
+        if v == "":
+            return None
+        return v
 
     @model_validator(mode="after")
     def enforce_mode_fields(self) -> "DhcpFailover":

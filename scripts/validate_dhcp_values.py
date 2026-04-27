@@ -43,6 +43,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic import ValidationError
 
 
+def _ip_to_int(ip: IPv4Address) -> int:
+    return int(ip)
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models — kept in sync with app/models.py
 # These are intentionally duplicated here so this script is self-contained.
@@ -70,7 +74,14 @@ class DhcpFailover(BaseModel):
     reservePercent: int = Field(default=0, ge=0, le=100)
     loadBalancePercent: Optional[int] = Field(default=None, ge=0, le=100)
     maxClientLeadTimeMinutes: int = Field(ge=1, le=1440)
-    sharedSecret: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    sharedSecret: Optional[str] = Field(default=None, max_length=256)
+
+    @field_validator("sharedSecret", mode="before")
+    @classmethod
+    def normalize_shared_secret(cls, v: object) -> object:
+        if v == "":
+            return None
+        return v
 
     @model_validator(mode="after")
     def enforce_mode_fields(self) -> "DhcpFailover":
@@ -102,6 +113,13 @@ class DhcpScopePayload(BaseModel):
     endRange: IPv4Address
     leaseDurationDays: int = Field(ge=1, le=3650)
     description: str = Field(default="", max_length=1024)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def normalize_description(cls, v: object) -> object:
+        if v is None:
+            return ""
+        return v
     gateway: IPv4Address
     dnsServers: list[IPv4Address] = Field(default_factory=list)
     dnsDomain: str = Field(default="", max_length=256)
@@ -118,6 +136,24 @@ class DhcpScopePayload(BaseModel):
                     f"exclusions[{i}] {excl.startAddress}-{excl.endAddress} is a duplicate"
                 )
             seen.add(key)
+        return self
+
+    @model_validator(mode="after")
+    def no_overlapping_exclusions(self) -> "DhcpScopePayload":
+        if len(self.exclusions) < 2:
+            return self
+        sorted_excl = sorted(
+            self.exclusions,
+            key=lambda x: (_ip_to_int(x.startAddress), _ip_to_int(x.endAddress)),
+        )
+        for i in range(len(sorted_excl) - 1):
+            a = sorted_excl[i]
+            b = sorted_excl[i + 1]
+            if _ip_to_int(a.endAddress) >= _ip_to_int(b.startAddress):
+                raise ValueError(
+                    f"exclusions overlap: {a.startAddress}-{a.endAddress} "
+                    f"overlaps with {b.startAddress}-{b.endAddress}"
+                )
         return self
 
     @model_validator(mode="after")
@@ -229,10 +265,10 @@ def _to_payload_kwargs(dv: dict) -> dict:
         "startRange":        dv.get("startRange"),
         "endRange":          dv.get("endRange"),
         "leaseDurationDays": dv.get("leaseDurationDays"),
-        "description":       dv.get("description", ""),
+        "description":       dv.get("description") or "",
         "gateway":           dv.get("gateway"),
         "dnsServers":        dns.get("servers") or [],
-        "dnsDomain":         dns.get("domain", ""),
+        "dnsDomain":         dns.get("domain") or "",
         "exclusions":        dv.get("exclusions") or [],
         "failover":          dv.get("failover"),
     }

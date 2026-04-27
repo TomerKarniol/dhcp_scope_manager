@@ -406,18 +406,18 @@ def test_end_range_is_broadcast_address_invalid():
     assert "endRange" in str(exc_info.value)
 
 
-def test_failover_empty_shared_secret_invalid():
-    """sharedSecret must be non-empty when present — use null, not empty string."""
-    with pytest.raises(ValidationError):
-        DhcpFailover(
-            partnerServer="dhcp02.lab.local",
-            relationshipName="rel1",
-            mode="HotStandby",
-            serverRole="Active",
-            reservePercent=5,
-            maxClientLeadTimeMinutes=60,
-            sharedSecret="",
-        )
+def test_failover_empty_shared_secret_normalizes_to_null():
+    """sharedSecret='' normalizes to null — allows sharedSecret: '' in values.yaml."""
+    f = DhcpFailover(
+        partnerServer="dhcp02.lab.local",
+        relationshipName="rel1",
+        mode="HotStandby",
+        serverRole="Active",
+        reservePercent=5,
+        maxClientLeadTimeMinutes=60,
+        sharedSecret="",
+    )
+    assert f.sharedSecret is None
 
 
 # ---------------------------------------------------------------------------
@@ -510,3 +510,136 @@ def test_loadbalance_valid_full():
     assert f.loadBalancePercent == 50
     assert f.serverRole == "Active"
     assert f.reservePercent == 0
+
+
+# ---------------------------------------------------------------------------
+# description null normalization
+# ---------------------------------------------------------------------------
+
+def test_description_none_normalizes_to_empty_string():
+    """description=None must normalize to '' — prevents Crossplane drift."""
+    scope = DhcpScopePayload(
+        scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
+        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        description=None,  # explicit null
+        gateway="10.0.0.1", dnsServers=[], dnsDomain="", exclusions=[],
+    )
+    assert scope.description == ""
+
+
+def test_description_empty_string_accepted():
+    """description='' must be accepted and preserved."""
+    scope = DhcpScopePayload(
+        scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
+        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        description="",
+        gateway="10.0.0.1", dnsServers=[], dnsDomain="", exclusions=[],
+    )
+    assert scope.description == ""
+
+
+# ---------------------------------------------------------------------------
+# sharedSecret normalization
+# ---------------------------------------------------------------------------
+
+def test_shared_secret_empty_string_normalizes_to_none():
+    """sharedSecret='' must normalize to None — allows sharedSecret: '' in values.yaml."""
+    f = DhcpFailover(
+        partnerServer="dhcp02.lab.local",
+        relationshipName="rel1",
+        mode="HotStandby",
+        serverRole="Active",
+        reservePercent=5,
+        maxClientLeadTimeMinutes=60,
+        sharedSecret="",
+    )
+    assert f.sharedSecret is None
+
+
+def test_shared_secret_none_accepted():
+    """sharedSecret=None must be accepted (no authentication configured)."""
+    f = DhcpFailover(
+        partnerServer="dhcp02.lab.local",
+        relationshipName="rel1",
+        mode="HotStandby",
+        serverRole="Active",
+        reservePercent=5,
+        maxClientLeadTimeMinutes=60,
+        sharedSecret=None,
+    )
+    assert f.sharedSecret is None
+
+
+def test_shared_secret_value_accepted():
+    """A non-empty sharedSecret must be accepted and preserved."""
+    f = DhcpFailover(
+        partnerServer="dhcp02.lab.local",
+        relationshipName="rel1",
+        mode="HotStandby",
+        serverRole="Active",
+        reservePercent=5,
+        maxClientLeadTimeMinutes=60,
+        sharedSecret="mysecret",
+    )
+    assert f.sharedSecret == "mysecret"
+
+
+# ---------------------------------------------------------------------------
+# Overlapping exclusion ranges
+# ---------------------------------------------------------------------------
+
+def test_overlapping_exclusions_rejected():
+    """Exclusion ranges that overlap must be rejected."""
+    with pytest.raises(ValidationError) as exc_info:
+        DhcpScopePayload(**_minimal_scope(
+            exclusions=[
+                {"startAddress": "10.20.30.1", "endAddress": "10.20.30.20"},
+                {"startAddress": "10.20.30.10", "endAddress": "10.20.30.30"},
+            ]
+        ))
+    assert "overlap" in str(exc_info.value).lower()
+
+
+def test_contained_exclusion_rejected():
+    """One exclusion range contained entirely within another is an overlap."""
+    with pytest.raises(ValidationError) as exc_info:
+        DhcpScopePayload(**_minimal_scope(
+            exclusions=[
+                {"startAddress": "10.20.30.1", "endAddress": "10.20.30.50"},
+                {"startAddress": "10.20.30.10", "endAddress": "10.20.30.20"},
+            ]
+        ))
+    assert "overlap" in str(exc_info.value).lower()
+
+
+def test_adjacent_exclusions_not_overlapping():
+    """Exclusions that share a boundary (end == start of next) do overlap; end+1 == start does not."""
+    # These are adjacent (touching) — should NOT overlap: endAddress .10 and startAddress .11
+    DhcpScopePayload(**_minimal_scope(
+        exclusions=[
+            {"startAddress": "10.20.30.1", "endAddress": "10.20.30.10"},
+            {"startAddress": "10.20.30.11", "endAddress": "10.20.30.20"},
+        ]
+    ))  # must not raise
+
+
+def test_touching_exclusions_at_same_ip_rejected():
+    """Exclusions where endAddress == startAddress of next do overlap (single shared IP)."""
+    with pytest.raises(ValidationError) as exc_info:
+        DhcpScopePayload(**_minimal_scope(
+            exclusions=[
+                {"startAddress": "10.20.30.1", "endAddress": "10.20.30.10"},
+                {"startAddress": "10.20.30.10", "endAddress": "10.20.30.20"},
+            ]
+        ))
+    assert "overlap" in str(exc_info.value).lower()
+
+
+def test_non_overlapping_exclusions_accepted():
+    """Two well-separated exclusion ranges must be accepted."""
+    DhcpScopePayload(**_minimal_scope(
+        exclusions=[
+            {"startAddress": "10.20.30.1", "endAddress": "10.20.30.10"},
+            {"startAddress": "10.20.30.20", "endAddress": "10.20.30.30"},
+        ]
+    ))  # must not raise

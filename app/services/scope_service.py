@@ -21,60 +21,43 @@ def _is_already_exists_error(stderr: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# PS execution helpers  (encapsulate recurring error-handling patterns)
+# PS execution helper  (single entry point with explicit error-handling policy)
 # ---------------------------------------------------------------------------
 
-def _try_run_ps(cmd: str) -> dict | list | None:
-    """Run a PS command; return None on not-found errors instead of raising.
+def _run_ps(
+    cmd: str,
+    *,
+    parse_json: bool = False,
+    ignore_not_found: bool = False,
+    ignore_already_exists: bool = False,
+    best_effort: bool = False,
+    warn_prefix: str | None = None,
+) -> dict | list | None:
+    """Central PowerShell execution helper with explicit error-handling policy.
 
-    Intentionally defined here rather than imported from ps_executor.
-    Tests patch 'scope_service.run_ps'; an imported function would close over
-    ps_executor's binding of run_ps and bypass that patch.
+    Policy flags (set exactly one per call to keep intent unambiguous):
+        ignore_not_found      – return None on not-found errors; re-raise all others.
+                                Use for: existence checks, optional lookups.
+        ignore_already_exists – silently accept "already exists/added/in use" errors.
+                                Use for: idempotent create operations.
+        best_effort           – return None on any PowerShellError.
+                                Use for: best-effort cleanup where any failure is OK.
+        warn_prefix           – log a warning with this prefix instead of raising.
+                                Use for: per-item cleanup where partial failure is tolerable.
     """
     try:
-        return run_ps(cmd)
+        return run_ps(cmd, parse_json=parse_json)
     except PowerShellError as exc:
-        if is_not_found_error(exc.stderr):
+        if best_effort:
+            return None
+        if warn_prefix is not None:
+            logger.warning("%s: %s", warn_prefix, exc.stderr)
+            return None
+        if ignore_not_found and is_not_found_error(exc.stderr):
+            return None
+        if ignore_already_exists and _is_already_exists_error(exc.stderr):
             return None
         raise
-
-
-def _try_run_ps_best_effort(cmd: str) -> dict | list | None:
-    """Run a PS command; return None on ANY PowerShellError (best-effort / idempotent ops).
-
-    Use when the absence of an object — for any reason — is acceptable and the
-    caller should simply proceed rather than fail. Distinct from _try_run_ps which
-    only suppresses not-found errors and propagates unexpected failures.
-    """
-    try:
-        return run_ps(cmd)
-    except PowerShellError:
-        return None
-
-
-def _run_ps_allow_existing(cmd: str) -> None:
-    """Run a fire-and-forget PS command; silently accept 'already exists' errors.
-
-    Used for idempotent create operations where the object may already be
-    present from a previous (partial) reconciliation cycle.
-    """
-    try:
-        run_ps(cmd, parse_json=False)
-    except PowerShellError as exc:
-        if not _is_already_exists_error(exc.stderr):
-            raise
-
-
-def _run_ps_warn_on_error(cmd: str, warning_prefix: str) -> None:
-    """Run a best-effort PS command; log a warning on failure and continue.
-
-    Used for cleanup operations where partial failure is acceptable
-    (e.g. removing individual exclusion ranges during scope deletion).
-    """
-    try:
-        run_ps(cmd, parse_json=False)
-    except PowerShellError as exc:
-        logger.warning("%s: %s", warning_prefix, exc.stderr)
 
 
 def _try_assemble_scope(scope_id: str) -> Optional[DhcpScopePayload]:
@@ -110,7 +93,11 @@ def list_scopes() -> list[DhcpScopePayload]:
 
 
 def scope_exists(scope_id: str) -> bool:
-    return _try_run_ps(f"Get-DhcpServerv4Scope -ScopeId {scope_id}") is not None
+    return _run_ps(
+        f"Get-DhcpServerv4Scope -ScopeId {scope_id}",
+        parse_json=True,
+        ignore_not_found=True,
+    ) is not None
 
 
 @log_call
@@ -142,9 +129,10 @@ def create_scope(payload: DhcpScopePayload) -> DhcpScopePayload:
     )
 
     for excl in payload.exclusions:
-        _run_ps_allow_existing(
+        _run_ps(
             f"Add-DhcpServerv4ExclusionRange -ScopeId {scope_id} "
-            f"-StartRange {excl.startAddress} -EndRange {excl.endAddress}"
+            f"-StartRange {excl.startAddress} -EndRange {excl.endAddress}",
+            ignore_already_exists=True,
         )
 
     if payload.failover is not None:
@@ -237,10 +225,10 @@ def delete_scope(scope_id: str) -> None:
         _remove_scope_from_failover(scope_id, current.failover.relationshipName)
 
     for excl in current.exclusions:
-        _run_ps_warn_on_error(
+        _run_ps(
             f"Remove-DhcpServerv4ExclusionRange -ScopeId {scope_id} "
             f"-StartRange {excl.startAddress} -EndRange {excl.endAddress}",
-            f"Failed to remove exclusion {excl.startAddress}",
+            warn_prefix=f"Failed to remove exclusion {excl.startAddress}",
         )
 
     run_ps(f"Remove-DhcpServerv4Scope -ScopeId {scope_id} -Force", parse_json=False)
@@ -257,7 +245,11 @@ def _remove_scope_from_failover(scope_id: str, rel_name: str) -> None:
         f"-ScopeId {scope_id} -Force",
         parse_json=False,
     )
-    rel_raw = _try_run_ps_best_effort(f'Get-DhcpServerv4Failover -Name "{_ps_str(rel_name)}"')
+    rel_raw = _run_ps(
+        f'Get-DhcpServerv4Failover -Name "{_ps_str(rel_name)}"',
+        parse_json=True,
+        best_effort=True,
+    )
     if rel_raw:
         rel = rel_raw if isinstance(rel_raw, dict) else rel_raw[0]
         if not rel.get("ScopeId"):
@@ -268,11 +260,16 @@ def _remove_scope_from_failover(scope_id: str, rel_name: str) -> None:
 
 
 def _setup_failover(scope_id: str, failover: DhcpFailover) -> None:
-    existing = _try_run_ps(f'Get-DhcpServerv4Failover -Name "{_ps_str(failover.relationshipName)}"')
+    existing = _run_ps(
+        f'Get-DhcpServerv4Failover -Name "{_ps_str(failover.relationshipName)}"',
+        parse_json=True,
+        ignore_not_found=True,
+    )
     if existing:
-        _run_ps_allow_existing(
+        _run_ps(
             f'Add-DhcpServerv4FailoverScope -Name "{_ps_str(failover.relationshipName)}" '
-            f"-ScopeId {scope_id}"
+            f"-ScopeId {scope_id}",
+            ignore_already_exists=True,
         )
     else:
         _create_failover_relationship(scope_id, failover)
