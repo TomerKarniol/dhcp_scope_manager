@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     POWERSHELL_COMMAND_TIMEOUT_SECONDS: int = Field(default=60, ge=1)
     POWERSHELL_ENV_CHECK_TIMEOUT_SECONDS: int = Field(default=15, ge=1)
-    POWERSHELL_MAX_CONCURRENCY: int = Field(default=5, ge=1)
+    POWERSHELL_MAX_CONCURRENCY: int = Field(default=10, ge=1)
 
 
 settings = Settings()
