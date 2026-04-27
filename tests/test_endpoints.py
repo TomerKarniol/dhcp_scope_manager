@@ -10,6 +10,10 @@ from app.services.ps_executor import PowerShellError
 client = TestClient(app, raise_server_exceptions=False)
 
 
+def _error(body):
+    return body["error"]
+
+
 def _make_scope_dict(**overrides):
     base = {
         "scopeName": "Cluster-A Management",
@@ -54,7 +58,9 @@ def test_get_missing_scope():
     ):
         r = client.get("/api/v1/scopes/10.20.30.0")
     assert r.status_code == 404
-    assert "not found" in r.json()["detail"].lower()
+    err = _error(r.json())
+    assert err["code"] == "SCOPE_NOT_FOUND"
+    assert "10.20.30.0" in err["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -122,14 +128,18 @@ def test_post_by_scope_id_mismatch_returns_400():
     }
     r = client.post("/api/v1/scopes/10.20.30.0", json=body)
     assert r.status_code == 400
-    assert "does not match" in r.json()["detail"]
+    err = _error(r.json())
+    assert err["code"] == "SCOPE_ID_MISMATCH"
+    assert "does not match" in err["message"]
 
 
 def test_post_by_scope_id_invalid_scope_id_returns_400():
     """POST /scopes/{scope_id} with malformed scope_id must return 400."""
     r = client.post("/api/v1/scopes/10.20.999.0", json=_make_scope_dict())
     assert r.status_code == 400
-    assert "Invalid scope ID" in r.json()["detail"]
+    err = _error(r.json())
+    assert err["code"] == "INVALID_SCOPE_ID"
+    assert "10.20.999.0" in err["message"]
 
 
 def test_post_by_scope_id_with_hotstandby_failover():
@@ -195,13 +205,14 @@ def test_put_update_scope():
 
 
 def test_put_scope_not_found():
-    from fastapi import HTTPException
+    from app.errors import ScopeNotFoundError
     with patch(
         "app.services.scope_service.update_scope",
-        side_effect=HTTPException(status_code=404, detail="Scope 10.20.30.0 not found"),
+        side_effect=ScopeNotFoundError("10.20.30.0"),
     ):
         r = client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
     assert r.status_code == 404
+    assert _error(r.json())["code"] == "SCOPE_NOT_FOUND"
 
 
 def test_put_scope_path_body_network_mismatch_returns_400():
@@ -229,7 +240,9 @@ def test_put_scope_path_body_network_mismatch_returns_400():
     }
     r = client.put("/api/v1/scopes/10.20.30.0", json=body)
     assert r.status_code == 400
-    assert "does not match" in r.json()["detail"]
+    err = _error(r.json())
+    assert err["code"] == "SCOPE_ID_MISMATCH"
+    assert "does not match" in err["message"]
 
 
 def test_put_scope_path_body_network_match_passes():
@@ -271,7 +284,9 @@ def test_delete_ps_error_during_assembly_returns_500():
                side_effect=PowerShellError("Get-DhcpServerv4Scope", "Access denied", 5)):
         r = client.delete("/api/v1/scopes/10.20.30.0")
     assert r.status_code == 500
-    assert "ps_error" in r.json()
+    err = _error(r.json())
+    assert err["code"] == "POWERSHELL_COMMAND_FAILED"
+    assert "ps_error" not in err
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +301,44 @@ def test_powershell_error_500():
         r = client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
     assert r.status_code == 500
     body = r.json()
-    assert "ps_error" in body
-    assert body["ps_error"] == "Access denied"
+    err = _error(body)
+    assert err["code"] == "POWERSHELL_COMMAND_FAILED"
+    assert err["message"] == "Failed to apply DHCP scope configuration"
+
+
+def test_powershell_timeout_returns_504():
+    with patch(
+        "app.services.scope_service.create_scope",
+        side_effect=PowerShellError("Set-DhcpServerv4Scope", "PowerShell command timed out after 60 seconds", -1),
+    ):
+        r = client.post("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
+    assert r.status_code == 504
+    assert _error(r.json())["code"] == "POWERSHELL_TIMEOUT"
+
+
+def test_powershell_already_exists_unhandled_returns_409():
+    with patch(
+        "app.services.scope_service.update_scope",
+        side_effect=PowerShellError("Add-DhcpServerv4Failover", "relationship already exists", 1),
+    ):
+        r = client.put("/api/v1/scopes/10.20.30.0", json=_make_scope_dict())
+    assert r.status_code == 409
+    assert _error(r.json())["code"] == "DHCP_CONFLICT"
+
+
+def test_unexpected_exception_returns_standard_500():
+    with patch("app.services.scope_service.list_scopes", side_effect=TypeError("boom")):
+        r = client.get("/api/v1/scopes")
+    assert r.status_code == 500
+    err = _error(r.json())
+    assert err["code"] == "INTERNAL_ERROR"
+    assert err["message"] == "Internal server error"
+
+
+def test_method_not_allowed_uses_standard_error_shape():
+    r = client.post("/api/v1/scopes", json=_make_scope_dict())
+    assert r.status_code == 405
+    assert _error(r.json())["code"] == "METHOD_NOT_ALLOWED"
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +352,37 @@ def test_auth_required_when_token_set():
     try:
         r = client.get("/api/v1/scopes/10.20.30.0")
         assert r.status_code == 401
+        err = _error(r.json())
+        assert err["code"] == "UNAUTHORIZED"
+        assert r.headers["www-authenticate"] == "Bearer"
+    finally:
+        auth_mod.settings.DHCP_API_TOKEN = original
+
+
+def test_auth_rejects_wrong_bearer_token():
+    import app.dependencies.auth as auth_mod
+    original = auth_mod.settings.DHCP_API_TOKEN
+    auth_mod.settings.DHCP_API_TOKEN = "secret-token"
+    try:
+        r = client.get(
+            "/api/v1/scopes/10.20.30.0",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        assert r.status_code == 401
+        assert _error(r.json())["code"] == "UNAUTHORIZED"
+    finally:
+        auth_mod.settings.DHCP_API_TOKEN = original
+
+
+def test_auth_disabled_when_token_empty():
+    import app.dependencies.auth as auth_mod
+    scope = _make_scope()
+    original = auth_mod.settings.DHCP_API_TOKEN
+    auth_mod.settings.DHCP_API_TOKEN = ""
+    try:
+        with patch("app.services.scope_service.assemble_scope_state", return_value=scope):
+            r = client.get("/api/v1/scopes/10.20.30.0")
+        assert r.status_code == 200
     finally:
         auth_mod.settings.DHCP_API_TOKEN = original
 
@@ -339,13 +421,33 @@ def test_healthz_endpoint():
 def test_invalid_scope_id_returns_400():
     r = client.get("/api/v1/scopes/10.20.999.0")
     assert r.status_code == 400
-    assert "Invalid scope ID" in r.json()["detail"]
+    assert _error(r.json())["code"] == "INVALID_SCOPE_ID"
 
 
 def test_invalid_scope_id_not_ip_returns_422():
     # Pattern validation on the path param catches non-IP strings before our validator
     r = client.get("/api/v1/scopes/not-an-ip")
-    assert r.status_code in (400, 422)
+    assert r.status_code == 400
+    assert _error(r.json())["code"] == "INVALID_SCOPE_ID"
+
+
+def test_invalid_request_body_returns_standard_validation_error():
+    body = _make_scope_dict(startRange="not-an-ip")
+    r = client.post("/api/v1/scopes/10.20.30.0", json=body)
+    assert r.status_code == 422
+    err = _error(r.json())
+    assert err["code"] == "VALIDATION_ERROR"
+    assert err["message"] == "Request validation failed"
+    assert any(e["field"] == "body.startRange" for e in err["details"]["errors"])
+
+
+def test_invalid_subnet_relationship_returns_validation_error():
+    body = _make_scope_dict(startRange="10.20.31.100", endRange="10.20.31.200")
+    r = client.post("/api/v1/scopes/10.20.30.0", json=body)
+    assert r.status_code == 422
+    err = _error(r.json())
+    assert err["code"] == "VALIDATION_ERROR"
+    assert err["details"]["errors"]
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +498,7 @@ def test_list_scopes_multiple():
 
 
 def test_list_scopes_ps_error_returns_500():
-    """PowerShell failure during list must return 500 with ps_error field."""
+    """PowerShell failure during list must return the standard safe 500 shape."""
     with patch(
         "app.services.scope_service.list_scopes",
         side_effect=PowerShellError("Get-DhcpServerv4Scope", "Access denied", 1),
@@ -404,8 +506,7 @@ def test_list_scopes_ps_error_returns_500():
         r = client.get("/api/v1/scopes")
     assert r.status_code == 500
     body = r.json()
-    assert "ps_error" in body
-    assert body["ps_error"] == "Access denied"
+    assert _error(body)["code"] == "POWERSHELL_COMMAND_FAILED"
 
 
 def test_list_scopes_sorted_numerically():

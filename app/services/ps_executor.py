@@ -9,11 +9,16 @@ logger = logging.getLogger(__name__)
 
 # Matches -SharedSecret "..." (including empty string) for log redaction.
 _SECRET_RE = re.compile(r'(-SharedSecret\s+)"[^"]*"', re.IGNORECASE)
+_WIN_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s,;]+")
 
 
-def _redact_secrets(command: str) -> str:
+def redact_powershell_command(command: str) -> str:
     """Remove sensitive parameter values from a command string before logging."""
     return _SECRET_RE.sub(r'\1"***REDACTED***"', command)
+
+
+def _sanitize_stderr_for_log(stderr: str) -> str:
+    return _WIN_PATH_RE.sub("<path>", stderr)
 
 
 class PowerShellError(Exception):
@@ -52,7 +57,7 @@ def run_ps(command: str, parse_json: bool = True) -> dict | list | None:
     if parse_json:
         full_cmd += " | ConvertTo-Json -Depth 5 -Compress"
 
-    logger.info("PS> %s", _redact_secrets(command))
+    logger.info("PS> %s", redact_powershell_command(command))
 
     try:
         result = subprocess.run(
@@ -65,7 +70,11 @@ def run_ps(command: str, parse_json: bool = True) -> dict | list | None:
         raise PowerShellError(command, "PowerShell command timed out after 60 seconds", -1)
 
     if result.returncode != 0:
-        logger.error("PS FAILED (rc=%d): %s", result.returncode, result.stderr.strip())
+        logger.error(
+            "PS FAILED (rc=%d): %s",
+            result.returncode,
+            _sanitize_stderr_for_log(result.stderr.strip()),
+        )
         raise PowerShellError(command, result.stderr.strip(), result.returncode)
 
     logger.debug("PS OUT: %s", result.stdout.strip()[:500])

@@ -32,7 +32,8 @@ app/
   main.py                    FastAPI app bootstrap
   config.py                  Env-based settings (DHCP_API_TOKEN, HOST, PORT, LOG_LEVEL)
   logging_config.py          JSON structured logging
-  exception_handlers.py      Global exception → HTTP mapping (PowerShellError, DhcpEnvironmentError)
+  errors.py                  Project error classes and stable machine-readable error codes
+  exception_handlers.py      Global exception → standard JSON error response mapping
   dependencies/
     auth.py                  Bearer token verification (verify_token dependency)
     scopes.py                scope_id and request body validation (validate_scope_id, validate_scope_request)
@@ -46,11 +47,11 @@ app/
     health.py                /healthz runtime capability check
   services/
     dhcp_env.py              Runtime guard (OS / PowerShell / DHCP cmdlets check)
-    ps_executor.py           PowerShell command runner with error handling
+    ps_executor.py           PowerShell command runner with timeout/error handling
     ps_parsers.py            Parse and normalize PowerShell JSON output
     scope_service.py         Core scope lifecycle logic (create / get / update / delete)
   utils/
-    decorators.py            Route-level decorators: handle_http_errors, handle_health_errors, log_call
+    decorators.py            Lightweight logging decorator for service calls
     ip_utils.py              IP integer conversion and TimeSpan parsing helpers
 
 helm/hosted-cluster-integration/
@@ -124,8 +125,66 @@ Base path: `/api/v1`
 
 All `/api/v1/scopes*` endpoints share two implicit checks that run before the handler:
 
-- **Environment guard** — rejects requests when the host cannot execute DHCP automation (wrong OS, missing PowerShell, no DHCP cmdlets). Returns `503`.
 - **Auth** — rejects requests when `DHCP_API_TOKEN` is set and the token is missing or wrong. Returns `401`.
+- **Environment guard** — rejects requests when the host cannot execute DHCP automation (wrong OS, missing PowerShell, no DHCP cmdlets). Returns `503`.
+
+## Error Response Format
+
+All API errors use the same envelope:
+
+```json
+{
+  "error": {
+    "code": "SCOPE_NOT_FOUND",
+    "message": "DHCP scope 10.20.30.0 was not found",
+    "details": {},
+    "requestId": "..."
+  }
+}
+```
+
+- `error.code` is stable and machine-readable for Crossplane events and automation.
+- `error.message` is human-readable and safe to expose.
+- `error.details` contains sanitized structured context such as `scopeId`, `network`, validation errors, or DHCP environment `reason`.
+- `error.requestId` is also returned as the `X-Request-ID` header. If the caller sends `X-Request-ID`, the API preserves it.
+
+Raw PowerShell commands, shared secrets, stack traces, and full internal stderr are not returned to clients. Backend logs include the exception type, request path, request ID, sanitized command, sanitized stderr, and traceback where useful.
+
+Common error codes:
+
+| HTTP Status | Error Code                     | Meaning                                                        |
+| ----------- | ------------------------------ | -------------------------------------------------------------- |
+| `400`       | `INVALID_SCOPE_ID`             | `scope_id` is not a valid IPv4 address                         |
+| `400`       | `SCOPE_ID_MISMATCH`            | Path `scope_id` does not match body `network`                  |
+| `401`       | `UNAUTHORIZED`                 | Missing or invalid bearer token                                |
+| `404`       | `SCOPE_NOT_FOUND`              | DHCP scope does not exist                                      |
+| `409`       | `DHCP_CONFLICT`                | Windows DHCP reported an unsafe already-exists/in-use conflict |
+| `422`       | `VALIDATION_ERROR`             | Request body failed FastAPI/Pydantic validation                |
+| `500`       | `POWERSHELL_COMMAND_FAILED`    | PowerShell failed unexpectedly                                 |
+| `500`       | `INTERNAL_ERROR`               | Unexpected Python/backend bug                                  |
+| `503`       | `DHCP_ENVIRONMENT_UNAVAILABLE` | Backend host cannot run DHCP automation                        |
+| `504`       | `POWERSHELL_TIMEOUT`           | PowerShell command timed out                                   |
+
+Validation errors include compact field entries:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request validation failed",
+    "details": {
+      "errors": [
+        {
+          "field": "body.startRange",
+          "message": "Input should be a valid IPv4 address",
+          "type": "ip_v4_address"
+        }
+      ]
+    },
+    "requestId": "..."
+  }
+}
+```
 
 ---
 
@@ -133,12 +192,12 @@ All `/api/v1/scopes*` endpoints share two implicit checks that run before the ha
 
 Returns all scopes sorted by network address (ascending).
 
-| Status | Body                                                         | When                            |
-| ------ | ------------------------------------------------------------ | ------------------------------- |
-| `200`  | `[DhcpScopePayload, ...]`                                    | Success                         |
-| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token     |
-| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed        |
-| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation |
+| Status | Body                                                    | When                            |
+| ------ | ------------------------------------------------------- | ------------------------------- |
+| `200`  | `[DhcpScopePayload, ...]`                               | Success                         |
+| `401`  | Standard error body with `UNAUTHORIZED`                 | Bad or missing bearer token     |
+| `500`  | Standard error body with `POWERSHELL_COMMAND_FAILED`    | PowerShell cmdlet failed        |
+| `503`  | Standard error body with `DHCP_ENVIRONMENT_UNAVAILABLE` | Host cannot run DHCP automation |
 
 ---
 
@@ -146,14 +205,16 @@ Returns all scopes sorted by network address (ascending).
 
 Creates the scope if it does not exist, then converges all options, exclusions, and failover to the desired state. Idempotent — never fails if the scope already exists.
 
-| Status | Body                                                         | When                                                                        |
-| ------ | ------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| `200`  | `DhcpScopePayload`                                           | Scope created or already present and converged                              |
-| `400`  | `{"detail": "..."}`                                          | `scope_id` is not a valid IPv4 address, or path `scope_id` ≠ body `network` |
-| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token                                                 |
-| `422`  | FastAPI validation error                                     | Request body fails Pydantic field constraints                               |
-| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed                                                    |
-| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation                                             |
+| Status | Body                                                               | When                                                                        |
+| ------ | ------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `200`  | `DhcpScopePayload`                                                 | Scope created or already present and converged                              |
+| `400`  | Standard error body with `INVALID_SCOPE_ID` or `SCOPE_ID_MISMATCH` | `scope_id` is not a valid IPv4 address, or path `scope_id` ≠ body `network` |
+| `401`  | Standard error body with `UNAUTHORIZED`                            | Bad or missing bearer token                                                 |
+| `409`  | Standard error body with `DHCP_CONFLICT`                           | Unsafe existing/in-use DHCP state                                           |
+| `422`  | Standard error body with `VALIDATION_ERROR`                        | Request body fails Pydantic field constraints                               |
+| `500`  | Standard error body with `POWERSHELL_COMMAND_FAILED`               | PowerShell cmdlet failed                                                    |
+| `503`  | Standard error body with `DHCP_ENVIRONMENT_UNAVAILABLE`            | Host cannot run DHCP automation                                             |
+| `504`  | Standard error body with `POWERSHELL_TIMEOUT`                      | PowerShell command timed out                                                |
 
 ---
 
@@ -161,14 +222,15 @@ Creates the scope if it does not exist, then converges all options, exclusions, 
 
 Returns the current canonical state of the scope. When Crossplane sees a `404` here it issues `POST` to create the scope.
 
-| Status | Body                                                         | When                                                       |
-| ------ | ------------------------------------------------------------ | ---------------------------------------------------------- |
-| `200`  | `DhcpScopePayload`                                           | Scope found                                                |
-| `400`  | `{"detail": "..."}`                                          | `scope_id` is not a valid IPv4 address                     |
-| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token                                |
-| `404`  | `{"detail": "Scope {scope_id} not found"}`                   | Scope does not exist on the DHCP server                    |
-| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed for a reason other than not-found |
-| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation                            |
+| Status | Body                                                    | When                                                       |
+| ------ | ------------------------------------------------------- | ---------------------------------------------------------- |
+| `200`  | `DhcpScopePayload`                                      | Scope found                                                |
+| `400`  | Standard error body with `INVALID_SCOPE_ID`             | `scope_id` is not a valid IPv4 address                     |
+| `401`  | Standard error body with `UNAUTHORIZED`                 | Bad or missing bearer token                                |
+| `404`  | Standard error body with `SCOPE_NOT_FOUND`              | Scope does not exist on the DHCP server                    |
+| `500`  | Standard error body with `POWERSHELL_COMMAND_FAILED`    | PowerShell cmdlet failed for a reason other than not-found |
+| `503`  | Standard error body with `DHCP_ENVIRONMENT_UNAVAILABLE` | Host cannot run DHCP automation                            |
+| `504`  | Standard error body with `POWERSHELL_TIMEOUT`           | PowerShell command timed out                               |
 
 ---
 
@@ -184,15 +246,17 @@ Diff-based convergence — compares the current scope state to the desired paylo
 | Exclusions removed                                                        | `Remove-DhcpServerv4ExclusionRange`                                                          |
 | Failover added / changed / removed                                        | `Add-DhcpServerv4Failover` / `Set-DhcpServerv4Failover` / `Remove-DhcpServerv4FailoverScope` |
 
-| Status | Body                                                         | When                                                                        |
-| ------ | ------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| `200`  | `DhcpScopePayload`                                           | Scope updated (or already at desired state — no-op)                         |
-| `400`  | `{"detail": "..."}`                                          | `scope_id` is not a valid IPv4 address, or path `scope_id` ≠ body `network` |
-| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token                                                 |
-| `404`  | `{"detail": "Scope {scope_id} not found"}`                   | Scope does not exist — Crossplane responds by issuing `POST`                |
-| `422`  | FastAPI validation error                                     | Request body fails Pydantic field constraints                               |
-| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed                                                    |
-| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation                                             |
+| Status | Body                                                               | When                                                                        |
+| ------ | ------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `200`  | `DhcpScopePayload`                                                 | Scope updated (or already at desired state — no-op)                         |
+| `400`  | Standard error body with `INVALID_SCOPE_ID` or `SCOPE_ID_MISMATCH` | `scope_id` is not a valid IPv4 address, or path `scope_id` ≠ body `network` |
+| `401`  | Standard error body with `UNAUTHORIZED`                            | Bad or missing bearer token                                                 |
+| `404`  | Standard error body with `SCOPE_NOT_FOUND`                         | Scope does not exist — Crossplane responds by issuing `POST`                |
+| `409`  | Standard error body with `DHCP_CONFLICT`                           | Unsafe existing/in-use DHCP state                                           |
+| `422`  | Standard error body with `VALIDATION_ERROR`                        | Request body fails Pydantic field constraints                               |
+| `500`  | Standard error body with `POWERSHELL_COMMAND_FAILED`               | PowerShell cmdlet failed                                                    |
+| `503`  | Standard error body with `DHCP_ENVIRONMENT_UNAVAILABLE`            | Host cannot run DHCP automation                                             |
+| `504`  | Standard error body with `POWERSHELL_TIMEOUT`                      | PowerShell command timed out                                                |
 
 ---
 
@@ -209,13 +273,14 @@ Deletion order:
 
 If failover detach fails, the delete propagates a `500` so Crossplane retries on the next cycle rather than removing the CR while the scope remains on the server.
 
-| Status | Body                                                         | When                                                   |
-| ------ | ------------------------------------------------------------ | ------------------------------------------------------ |
-| `204`  | _(empty)_                                                    | Scope deleted, or scope did not exist                  |
-| `400`  | `{"detail": "..."}`                                          | `scope_id` is not a valid IPv4 address                 |
-| `401`  | `{"detail": "Unauthorized"}`                                 | Bad or missing bearer token                            |
-| `500`  | `{"detail": "PowerShell command failed", "ps_error": "..."}` | PowerShell cmdlet failed (e.g. failover detach failed) |
-| `503`  | `{"detail": "...", "reason": "..."}`                         | Host cannot run DHCP automation                        |
+| Status | Body                                                    | When                                                   |
+| ------ | ------------------------------------------------------- | ------------------------------------------------------ |
+| `204`  | _(empty)_                                               | Scope deleted, or scope did not exist                  |
+| `400`  | Standard error body with `INVALID_SCOPE_ID`             | `scope_id` is not a valid IPv4 address                 |
+| `401`  | Standard error body with `UNAUTHORIZED`                 | Bad or missing bearer token                            |
+| `500`  | Standard error body with `POWERSHELL_COMMAND_FAILED`    | PowerShell cmdlet failed (e.g. failover detach failed) |
+| `503`  | Standard error body with `DHCP_ENVIRONMENT_UNAVAILABLE` | Host cannot run DHCP automation                        |
+| `504`  | Standard error body with `POWERSHELL_TIMEOUT`           | PowerShell command timed out                           |
 
 ---
 
@@ -232,8 +297,8 @@ Protected by auth (like all endpoints). Does **not** check the DHCP environment 
 | Status | Body                                                    | When                        |
 | ------ | ------------------------------------------------------- | --------------------------- |
 | `200`  | `{"status": "ok"}`                                      | All checks pass             |
-| `401`  | `{"detail": "Unauthorized"}`                            | Bad or missing bearer token |
-| `503`  | `{"status": "error", "detail": "...", "reason": "..."}` | Any runtime check fails     |
+| `401`  | Standard error body with `UNAUTHORIZED`                 | Bad or missing bearer token |
+| `503`  | Standard error body with `DHCP_ENVIRONMENT_UNAVAILABLE` | Any runtime check fails     |
 
 `reason` values: `unsupported_os`, `wsl_detected`, `powershell_not_found`, `powershell_exec_failed`, `dhcp_cmdlets_unavailable`.
 
@@ -298,16 +363,18 @@ helm template dhcp-request ./helm/hosted-cluster-integration \
 
 Quick reference — see the per-endpoint tables above for the exact set each route can return.
 
-| Code  | Meaning               | Body shape                                                                                                     |
-| ----- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `200` | OK                    | `DhcpScopePayload` or `[DhcpScopePayload, ...]` or `{"status": "ok"}`                                          |
-| `204` | No Content            | _(empty)_ — DELETE only                                                                                        |
-| `400` | Bad Request           | `{"detail": "..."}` — invalid `scope_id` or path/body network mismatch                                         |
-| `401` | Unauthorized          | `{"detail": "Unauthorized"}` — only when `DHCP_API_TOKEN` is set                                               |
-| `404` | Not Found             | `{"detail": "Scope {scope_id} not found"}` — GET and PUT only                                                  |
-| `422` | Unprocessable Entity  | FastAPI validation error — POST and PUT only                                                                   |
-| `500` | Internal Server Error | `{"detail": "PowerShell command failed", "ps_error": "..."}`                                                   |
-| `503` | Service Unavailable   | `{"detail": "...", "reason": "..."}` or `{"status": "error", "detail": "...", "reason": "..."}` for `/healthz` |
+| Code  | Meaning               | Error code examples                                                                    |
+| ----- | --------------------- | -------------------------------------------------------------------------------------- |
+| `200` | OK                    | Success response: `DhcpScopePayload`, `[DhcpScopePayload, ...]`, or `{"status": "ok"}` |
+| `204` | No Content            | Success response with empty body — DELETE only                                         |
+| `400` | Bad Request           | `INVALID_SCOPE_ID`, `SCOPE_ID_MISMATCH`                                                |
+| `401` | Unauthorized          | `UNAUTHORIZED`                                                                         |
+| `404` | Not Found             | `SCOPE_NOT_FOUND` — GET and PUT only                                                   |
+| `409` | Conflict              | `DHCP_CONFLICT`                                                                        |
+| `422` | Unprocessable Entity  | `VALIDATION_ERROR`                                                                     |
+| `500` | Internal Server Error | `POWERSHELL_COMMAND_FAILED`, `INTERNAL_ERROR`                                          |
+| `503` | Service Unavailable   | `DHCP_ENVIRONMENT_UNAVAILABLE`                                                         |
+| `504` | Gateway Timeout       | `POWERSHELL_TIMEOUT`                                                                   |
 
 ## Reconciliation Contract
 
@@ -371,8 +438,32 @@ validate-dhcp-values:
 - Runtime environment guard rejects all scope operations on non-Windows / non-DHCP hosts
 - `-ErrorAction Stop` on every PowerShell command
 - Shared secrets are never logged
-- PowerShell stderr is sanitized before returning to clients
+- PowerShell stderr is sanitized before returning to clients and logs
 - Structured JSON logs include `scope_id`, `operation`, `result`, `duration`
+
+## Debugging Errors
+
+From Crossplane events:
+
+1. Read `error.code` first. It is stable and safe to use for automation.
+2. Use `error.message` for the short human explanation.
+3. Use `error.details` for safe context such as `scopeId`, body validation fields, or DHCP environment `reason`.
+4. Copy `error.requestId` and search backend logs for the same request ID.
+
+From backend logs:
+
+- `AppError` entries mean the request failed in an expected, client-safe way.
+- `RequestValidationError` entries include sanitized validation fields and messages, not raw input values.
+- `PowerShellError` entries include return code, sanitized command, sanitized stderr, and traceback.
+- `DhcpEnvironmentError` entries include the full internal environment failure detail.
+- `INTERNAL_ERROR` responses mean an unexpected Python exception reached the fallback handler; inspect the traceback by `requestId`.
+
+Crossplane-specific behavior:
+
+- `GET` missing scope returns `404 SCOPE_NOT_FOUND`, which lets provider-http create it.
+- `PUT` missing scope returns `404 SCOPE_NOT_FOUND`, which exposes drift instead of silently writing to the wrong object.
+- `DELETE` missing scope returns `204 No Content`; deletes are intentionally idempotent.
+- Delete failures after partial cleanup return an error so Crossplane retries rather than removing the CR while DHCP state remains.
 
 ## Testing
 

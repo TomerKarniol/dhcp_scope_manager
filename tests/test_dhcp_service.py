@@ -26,6 +26,10 @@ from app.services.dhcp_service import (
 client = TestClient(app, raise_server_exceptions=False)
 
 
+def _error(body):
+    return body["error"]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -228,30 +232,30 @@ class TestRouteLevelProtection:
         with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
         assert r.status_code == 503
-        body = r.json()
-        assert body["reason"] == DhcpEnvReason.WSL_DETECTED
-        assert "WSL" in body["detail"]
+        err = _error(r.json())
+        assert err["code"] == "DHCP_ENVIRONMENT_UNAVAILABLE"
+        assert err["details"]["reason"] == DhcpEnvReason.WSL_DETECTED
 
     def test_dhcp_route_returns_503_on_linux(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.UNSUPPORTED_OS, "Linux not supported")
         with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
         assert r.status_code == 503
-        assert r.json()["reason"] == DhcpEnvReason.UNSUPPORTED_OS
+        assert _error(r.json())["details"]["reason"] == DhcpEnvReason.UNSUPPORTED_OS
 
     def test_dhcp_route_returns_503_on_no_powershell(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.POWERSHELL_NOT_FOUND, "PS not found")
         with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
         assert r.status_code == 503
-        assert r.json()["reason"] == DhcpEnvReason.POWERSHELL_NOT_FOUND
+        assert _error(r.json())["details"]["reason"] == DhcpEnvReason.POWERSHELL_NOT_FOUND
 
     def test_dhcp_route_returns_503_on_cmdlets_unavailable(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE, "no cmdlets")
         with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
         assert r.status_code == 503
-        assert r.json()["reason"] == DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE
+        assert _error(r.json())["details"]["reason"] == DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE
 
     def test_post_route_also_protected(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.WSL_DETECTED, "WSL")
@@ -278,15 +282,14 @@ class TestRouteLevelProtection:
         assert r.status_code == 503
 
     def test_503_body_has_reason_and_detail(self):
-        """Response must always have machine-readable reason and human-readable detail."""
+        """Response must always have machine-readable code/reason and human-readable message."""
         exc = DhcpEnvironmentError(DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE, "cmdlet missing")
         with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get(self._scope_path())
-        body = r.json()
-        assert "reason" in body
-        assert "detail" in body
-        assert body["reason"] == DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE
-        assert body["detail"] == "cmdlet missing"
+        err = _error(r.json())
+        assert err["code"] == "DHCP_ENVIRONMENT_UNAVAILABLE"
+        assert err["message"] == "DHCP PowerShell cmdlets are unavailable"
+        assert err["details"]["reason"] == DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE
 
 
 # ---------------------------------------------------------------------------
@@ -338,17 +341,16 @@ class TestHealthEndpoint:
         with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get("/healthz")
         assert r.status_code == 503
-        body = r.json()
-        assert body["status"] == "error"
-        assert body["reason"] == DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE
-        assert "no cmdlets" in body["detail"]
+        err = _error(r.json())
+        assert err["code"] == "DHCP_ENVIRONMENT_UNAVAILABLE"
+        assert err["details"]["reason"] == DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE
 
     def test_healthz_returns_503_for_wsl(self):
         exc = DhcpEnvironmentError(DhcpEnvReason.WSL_DETECTED, "WSL")
         with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = client.get("/healthz")
         assert r.status_code == 503
-        assert r.json()["reason"] == DhcpEnvReason.WSL_DETECTED
+        assert _error(r.json())["details"]["reason"] == DhcpEnvReason.WSL_DETECTED
 
     def test_healthz_callable_regardless_of_scope_router_protection(self):
         """Health endpoint must not inherit the scopes router dependency."""
@@ -359,4 +361,4 @@ class TestHealthEndpoint:
         # Returns 503 (the handler runs and returns a structured response),
         # not a 500 unhandled exception
         assert r.status_code == 503
-        assert "reason" in r.json()
+        assert _error(r.json())["details"]["reason"] == DhcpEnvReason.UNSUPPORTED_OS

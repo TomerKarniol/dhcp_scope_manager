@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from app.errors import ScopeNotFoundError
 from app.models import DhcpFailover, DhcpScopePayload
 from app.services.ps_executor import PowerShellError, is_not_found_error, run_ps
 from app.services.ps_parsers import assemble_scope_state, normalize_list
@@ -77,6 +78,16 @@ def _try_assemble_scope(scope_id: str) -> Optional[DhcpScopePayload]:
         raise
 
 
+def _assemble_existing_scope(scope_id: str) -> DhcpScopePayload:
+    """Assemble a scope and translate legitimate missing-scope errors to domain 404."""
+    try:
+        return assemble_scope_state(scope_id)
+    except PowerShellError as exc:
+        if is_not_found_error(exc.stderr):
+            raise ScopeNotFoundError(str(scope_id)) from exc
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -147,12 +158,12 @@ def create_scope(payload: DhcpScopePayload) -> DhcpScopePayload:
 
 @log_call
 def get_scope(scope_id: str) -> DhcpScopePayload:
-    return assemble_scope_state(scope_id)
+    return _assemble_existing_scope(scope_id)
 
 
 @log_call
 def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePayload:
-    current = assemble_scope_state(scope_id)
+    current = _assemble_existing_scope(scope_id)
 
     if (
         current.scopeName != desired.scopeName
@@ -208,7 +219,7 @@ def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePayload:
 
     _handle_failover_diff(scope_id, current.failover, desired.failover)
 
-    return assemble_scope_state(scope_id)
+    return _assemble_existing_scope(scope_id)
 
 
 @log_call
