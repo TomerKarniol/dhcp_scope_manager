@@ -1,7 +1,11 @@
 from __future__ import annotations
+from ipaddress import AddressValueError, IPv4Address
 import logging
+from typing import Any
+
+from app.errors import InvalidScopeIdError
 from app.models import DhcpExclusion, DhcpFailover, DhcpScopePayload
-from app.services.ps_executor import PowerShellError, is_not_found_error, run_ps
+from app.services.ps_executor import run_ps
 from app.utils.ip_utils import ip_to_int, parse_timespan_days, parse_timespan_minutes
 
 logger = logging.getLogger(__name__)
@@ -16,6 +20,75 @@ def normalize_list(result) -> list:
     if isinstance(result, dict):
         return [result]
     return result
+
+
+def ps_single_quote(value: str) -> str:
+    """Return a PowerShell single-quoted string literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _validated_scope_id(scope_id: str) -> str:
+    scope_text = str(scope_id)
+    try:
+        return str(IPv4Address(scope_text))
+    except (AddressValueError, ValueError):
+        raise InvalidScopeIdError(scope_text)
+
+
+def build_get_scope_state_script(scope_id: str) -> str:
+    """Build a single PowerShell script that emits all scope state as JSON."""
+    scope_literal = ps_single_quote(_validated_scope_id(scope_id))
+    return f"""
+$ScopeId = {scope_literal}
+
+function Test-DhcpNoExclusions($ErrorRecord) {{
+    $message = [string]$ErrorRecord.Exception.Message
+    return (
+        $message -match '(?i)exclusion' -and
+        $message -match '(?i)(not found|cannot find|does not exist|no .*exclusion)'
+    )
+}}
+
+function Test-DhcpNoFailover($ErrorRecord) {{
+    $message = [string]$ErrorRecord.Exception.Message
+    return (
+        $message -match '(?i)(failover|relationship)' -and
+        $message -match '(?i)(not found|cannot find|does not exist|not configured|not associated|no .*failover)'
+    )
+}}
+
+$scope = Get-DhcpServerv4Scope -ScopeId $ScopeId -ErrorAction Stop
+$options = @(Get-DhcpServerv4OptionValue -ScopeId $ScopeId -ErrorAction Stop)
+
+try {{
+    $exclusions = @(Get-DhcpServerv4ExclusionRange -ScopeId $ScopeId -ErrorAction Stop)
+}} catch {{
+    if (Test-DhcpNoExclusions $_) {{
+        $exclusions = @()
+    }} else {{
+        throw
+    }}
+}}
+
+try {{
+    $failover = Get-DhcpServerv4Failover -ScopeId $ScopeId -ErrorAction Stop
+}} catch {{
+    if (Test-DhcpNoFailover $_) {{
+        $failover = $null
+    }} else {{
+        throw
+    }}
+}}
+
+$result = [PSCustomObject]@{{
+    scope = $scope
+    options = $options
+    exclusions = $exclusions
+    failover = $failover
+}}
+
+$result | ConvertTo-Json -Depth 10 -Compress
+""".strip()
 
 
 def extract_option(options: list, option_id: int) -> str:
@@ -52,48 +125,31 @@ def parse_failover(raw: dict) -> DhcpFailover:
     )
 
 
-async def assemble_scope_state(scope_id: str) -> DhcpScopePayload:
-    """Query Windows DHCP via PowerShell and assemble the canonical DhcpScopePayload.
+def normalize_get_scope_state(raw: Any) -> dict[str, Any]:
+    """Normalize the combined JSON object emitted by build_get_scope_state_script."""
+    if not isinstance(raw, dict):
+        raise ValueError("Expected DHCP scope state JSON object")
 
-    This is the single source of truth for GET responses. The output MUST be
-    byte-for-byte comparable to the PUT/POST body Crossplane sends.
-    """
-    # 1. Scope basic info
-    scope = await run_ps(f"Get-DhcpServerv4Scope -ScopeId {scope_id}")
+    return {
+        "scope": raw.get("scope") or {},
+        "options": normalize_list(raw.get("options")),
+        "exclusions": normalize_list(raw.get("exclusions")),
+        "failover": raw.get("failover"),
+    }
 
-    # 2. Scope options (gateway, DNS, domain)
-    options_raw = await run_ps(f"Get-DhcpServerv4OptionValue -ScopeId {scope_id}")
-    options = normalize_list(options_raw)
 
-    # 3. Exclusion ranges
-    # A scope with no exclusions returns empty output (not an error).
-    # Re-raise unexpected errors (permission denied, PS crash) — silently returning
-    # no exclusions would cause the next reconciliation to delete them from the server.
-    exclusions_raw = None
-    try:
-        exclusions_raw = await run_ps(f"Get-DhcpServerv4ExclusionRange -ScopeId {scope_id}")
-    except PowerShellError as exc:
-        if not is_not_found_error(exc.stderr):
-            raise
-        # Scope exists but has no exclusion ranges — treat as empty.
+def build_payload_from_scope_state(scope_id: str, state: dict[str, Any]) -> DhcpScopePayload:
+    scope_id = _validated_scope_id(scope_id)
+    scope = state["scope"]
+    options = state["options"]
+    exclusions_list = state["exclusions"]
 
-    exclusions_list = normalize_list(exclusions_raw)
-
-    # 4. Failover (may not exist — that is normal)
-    # Windows DHCP raises a "not found" error when the scope has no failover relationship.
-    # Re-raise unexpected errors (permission denied, PS crash) — silently returning
-    # null failover would cause the next reconciliation to remove the relationship.
+    failover_raw = state["failover"]
     failover_obj: DhcpFailover | None = None
-    try:
-        failover_raw = await run_ps(f"Get-DhcpServerv4Failover -ScopeId {scope_id}")
-        if failover_raw:
-            failover_obj = parse_failover(
-                failover_raw if isinstance(failover_raw, dict) else failover_raw[0]
-            )
-    except PowerShellError as exc:
-        if not is_not_found_error(exc.stderr):
-            raise
-        # No failover relationship for this scope.
+    if failover_raw:
+        failover_obj = parse_failover(
+            failover_raw if isinstance(failover_raw, dict) else failover_raw[0]
+        )
 
     # Parse lease duration: "8.00:00:00" → 8
     lease_days = parse_timespan_days(str(scope.get("LeaseDuration", "8.00:00:00")))
@@ -124,3 +180,19 @@ async def assemble_scope_state(scope_id: str) -> DhcpScopePayload:
         exclusions=exclusions,
         failover=failover_obj,
     )
+
+
+async def assemble_scope_state(scope_id: str) -> DhcpScopePayload:
+    """Query Windows DHCP once and assemble the canonical DhcpScopePayload.
+
+    This is the single source of truth for GET responses. The output MUST be
+    byte-for-byte comparable to the PUT/POST body Crossplane sends.
+    """
+    script = build_get_scope_state_script(scope_id)
+    raw = await run_ps(
+        script,
+        append_error_action=False,
+        append_convert_to_json=False,
+    )
+    state = normalize_get_scope_state(raw)
+    return build_payload_from_scope_state(scope_id, state)

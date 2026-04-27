@@ -17,7 +17,6 @@ import asyncio
 from unittest.mock import patch
 import pytest
 from app.models import DhcpExclusion, DhcpFailover, DhcpScopePayload
-from app.services.ps_executor import PowerShellError
 from app.services.ps_parsers import assemble_scope_state, parse_failover
 from app.utils.ip_utils import parse_timespan_days, parse_timespan_minutes
 
@@ -98,22 +97,13 @@ def _ps_failover(**overrides) -> dict:
 
 
 def _assemble(scope_raw, options_raw, exclusions_raw, failover_raw=None) -> dict:
-    def fake_run_ps(cmd, parse_json=True):
-        if "Get-DhcpServerv4Scope" in cmd:
-            return scope_raw
-        if "Get-DhcpServerv4OptionValue" in cmd:
-            return options_raw
-        if "Get-DhcpServerv4ExclusionRange" in cmd:
-            if exclusions_raw is None:
-                raise PowerShellError(cmd, "Cannot find exclusion range for scope", 1)
-            return exclusions_raw
-        if "Get-DhcpServerv4Failover" in cmd:
-            if failover_raw is None:
-                raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
-            return failover_raw
-        return None
-
-    with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
+    state = {
+        "scope": scope_raw,
+        "options": options_raw,
+        "exclusions": [] if exclusions_raw is None else exclusions_raw,
+        "failover": failover_raw,
+    }
+    with patch("app.services.ps_parsers.run_ps", return_value=state):
         result = asyncio.run(assemble_scope_state("10.20.30.0"))
     return result.model_dump(mode="json")
 

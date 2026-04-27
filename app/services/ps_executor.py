@@ -74,11 +74,21 @@ def is_not_found_error(stderr: str) -> bool:
     return any(kw in lower for kw in ("not found", "does not exist", "no dhcp scope", "cannot find"))
 
 
-async def run_ps(command: str, parse_json: bool = True) -> dict | list | None:
+async def run_ps(
+    command: str,
+    parse_json: bool = True,
+    *,
+    append_error_action: bool = True,
+    append_convert_to_json: bool = True,
+) -> dict | list | None:
     """Execute a PowerShell command and optionally parse JSON output.
 
-    Always appends -ErrorAction Stop so errors raise PowerShellError instead
-    of silently returning empty output.
+    By default, appends -ErrorAction Stop so errors raise PowerShellError
+    instead of silently returning empty output, and appends ConvertTo-Json for
+    callers that want parsed JSON from a plain PowerShell object.
+
+    Set append_error_action=False and append_convert_to_json=False only for
+    complete scripts that already handle per-cmdlet errors and emit JSON.
 
     Execution-layer guard: validates DHCP environment before every call.
     This is a mandatory safety net — even if route-level protection is bypassed,
@@ -91,8 +101,10 @@ async def run_ps(command: str, parse_json: bool = True) -> dict | list | None:
     """
     await dhcp_service.validate_dhcp_environment()
 
-    full_cmd = f"{command} -ErrorAction Stop"
-    if parse_json:
+    full_cmd = command
+    if append_error_action:
+        full_cmd = f"{full_cmd} -ErrorAction Stop"
+    if parse_json and append_convert_to_json:
         full_cmd += " | ConvertTo-Json -Depth 5 -Compress"
 
     logger.info("PS> %s", redact_powershell_command(command))

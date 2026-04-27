@@ -259,7 +259,6 @@ class TestExclusionSortDeterminism:
     async def test_exclusions_sorted_by_start_ascending(self):
         """PS may return exclusions in any order; assemble_scope_state must sort them ascending."""
         from app.services.ps_parsers import assemble_scope_state
-        from app.services.ps_executor import PowerShellError as PSError
 
         scope_data = {
             "Name": "Test", "SubnetMask": "255.255.255.0",
@@ -278,7 +277,12 @@ class TestExclusionSortDeterminism:
         ]
 
         with patch("app.services.ps_parsers.run_ps") as mock_ps:
-            mock_ps.side_effect = [scope_data, options_data, excl_data, PSError("failover", "not found", 1)]
+            mock_ps.return_value = {
+                "scope": scope_data,
+                "options": options_data,
+                "exclusions": excl_data,
+                "failover": None,
+            }
             result = await assemble_scope_state("10.20.30.0")
 
         assert len(result.exclusions) == 2
@@ -288,7 +292,6 @@ class TestExclusionSortDeterminism:
     async def test_exclusions_sorted_by_start_primarily(self):
         """Primary sort key is startAddress."""
         from app.services.ps_parsers import assemble_scope_state
-        from app.services.ps_executor import PowerShellError as PSError
 
         scope_data = {
             "Name": "Test", "SubnetMask": "255.255.255.0",
@@ -306,7 +309,12 @@ class TestExclusionSortDeterminism:
         ]
 
         with patch("app.services.ps_parsers.run_ps") as mock_ps:
-            mock_ps.side_effect = [scope_data, options_data, excl_data, PSError("failover", "not found", 1)]
+            mock_ps.return_value = {
+                "scope": scope_data,
+                "options": options_data,
+                "exclusions": excl_data,
+                "failover": None,
+            }
             result = await assemble_scope_state("10.20.30.0")
 
         assert str(result.exclusions[0].startAddress) == "10.20.30.10"

@@ -568,20 +568,20 @@ async def test_list_scopes_item_shape_matches_single_scope_get(
     mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw
 ):
     """Each item from GET /scopes must be byte-for-byte identical to GET /scopes/{scope_id}."""
-    from app.services.ps_executor import PowerShellError as PSE
 
-    def fake_run_ps(cmd, parse_json=True):
+    state = {
+        "scope": mock_ps_scope_raw,
+        "options": mock_ps_options_raw,
+        "exclusions": mock_ps_exclusions_raw,
+        "failover": None,
+    }
+
+    def fake_run_ps(cmd, parse_json=True, **_kwargs):
+        if "ConvertTo-Json -Depth 10 -Compress" in cmd:
+            return state
         # List call — no -ScopeId flag
         if "Get-DhcpServerv4Scope" in cmd and "-ScopeId" not in cmd:
             return [mock_ps_scope_raw]
-        if "Get-DhcpServerv4Scope" in cmd:
-            return mock_ps_scope_raw
-        if "Get-DhcpServerv4OptionValue" in cmd:
-            return mock_ps_options_raw
-        if "Get-DhcpServerv4ExclusionRange" in cmd:
-            return mock_ps_exclusions_raw
-        if "Get-DhcpServerv4Failover" in cmd:
-            raise PSE(cmd, "Cannot find failover relationship for scope", 1)
         return None
 
     with patch("app.services.scope_service.run_ps", side_effect=fake_run_ps), \
@@ -605,19 +605,19 @@ async def test_list_scopes_failover_null_consistent(
     mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw
 ):
     """failover: null in list items must match failover: null in single-scope GET."""
-    from app.services.ps_executor import PowerShellError as PSE
 
-    def fake_run_ps(cmd, parse_json=True):
+    state = {
+        "scope": mock_ps_scope_raw,
+        "options": mock_ps_options_raw,
+        "exclusions": mock_ps_exclusions_raw,
+        "failover": None,
+    }
+
+    def fake_run_ps(cmd, parse_json=True, **_kwargs):
+        if "ConvertTo-Json -Depth 10 -Compress" in cmd:
+            return state
         if "Get-DhcpServerv4Scope" in cmd and "-ScopeId" not in cmd:
             return [mock_ps_scope_raw]
-        if "Get-DhcpServerv4Scope" in cmd:
-            return mock_ps_scope_raw
-        if "Get-DhcpServerv4OptionValue" in cmd:
-            return mock_ps_options_raw
-        if "Get-DhcpServerv4ExclusionRange" in cmd:
-            return mock_ps_exclusions_raw
-        if "Get-DhcpServerv4Failover" in cmd:
-            raise PSE(cmd, "Cannot find failover relationship for scope", 1)
         return None
 
     with patch("app.services.scope_service.run_ps", side_effect=fake_run_ps), \
@@ -646,7 +646,6 @@ async def test_get_put_roundtrip(
     null handling, and array ordering issues.
     """
     from app.services.ps_parsers import assemble_scope_state as real_assemble
-    from app.services.ps_executor import PowerShellError
 
     # Build the "desired" payload — this is what Crossplane would send as PUT body
     put_payload = DhcpScopePayload(
@@ -665,19 +664,15 @@ async def test_get_put_roundtrip(
     )
     put_json = put_payload.model_dump(mode="json")
 
-    # Simulate GET response assembled from PowerShell output
-    def fake_run_ps(cmd, parse_json=True):
-        if "Get-DhcpServerv4Scope" in cmd:
-            return mock_ps_scope_raw
-        if "Get-DhcpServerv4OptionValue" in cmd:
-            return mock_ps_options_raw
-        if "Get-DhcpServerv4ExclusionRange" in cmd:
-            return mock_ps_exclusions_raw
-        if "Get-DhcpServerv4Failover" in cmd:
-            raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
-        return None
+    # Simulate GET response assembled from the single PowerShell JSON object.
+    state = {
+        "scope": mock_ps_scope_raw,
+        "options": mock_ps_options_raw,
+        "exclusions": mock_ps_exclusions_raw,
+        "failover": None,
+    }
 
-    with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
+    with patch("app.services.ps_parsers.run_ps", return_value=state):
         get_payload = await real_assemble("10.20.30.0")
     get_json = get_payload.model_dump(mode="json")
 

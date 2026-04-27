@@ -1,11 +1,16 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import pytest
+from app.errors import InvalidScopeIdError
 from app.services.ps_executor import PowerShellError
 from app.services.ps_parsers import (
+    build_get_scope_state_script,
+    build_payload_from_scope_state,
     normalize_list,
+    normalize_get_scope_state,
     extract_option,
     extract_option_list,
     parse_failover,
+    ps_single_quote,
     assemble_scope_state,
 )
 from app.utils.ip_utils import ip_to_int, parse_timespan_days, parse_timespan_minutes
@@ -92,24 +97,36 @@ def test_extract_option_missing(mock_ps_options_raw):
     assert extract_option_list(mock_ps_options_raw, 999) == []
 
 
+def _scope_state(scope, options, exclusions=None, failover=None):
+    return {
+        "scope": scope,
+        "options": options,
+        "exclusions": [] if exclusions is None else exclusions,
+        "failover": failover,
+    }
+
+
 @pytest.mark.asyncio
 async def test_assemble_scope_state(
     mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw, mock_ps_failover_raw
 ):
-    def fake_run_ps(cmd, parse_json=True):
-        if "Get-DhcpServerv4Scope" in cmd:
-            return mock_ps_scope_raw
-        if "Get-DhcpServerv4OptionValue" in cmd:
-            return mock_ps_options_raw
-        if "Get-DhcpServerv4ExclusionRange" in cmd:
-            return mock_ps_exclusions_raw
-        if "Get-DhcpServerv4Failover" in cmd:
-            return mock_ps_failover_raw
-        return None
-
-    with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
+    with patch(
+        "app.services.ps_parsers.run_ps",
+        new=AsyncMock(
+            return_value=_scope_state(
+                mock_ps_scope_raw,
+                mock_ps_options_raw,
+                mock_ps_exclusions_raw,
+                mock_ps_failover_raw,
+            )
+        ),
+    ) as mock_ps:
         result = await assemble_scope_state("10.20.30.0")
 
+    mock_ps.assert_awaited_once()
+    _, kwargs = mock_ps.await_args
+    assert kwargs["append_error_action"] is False
+    assert kwargs["append_convert_to_json"] is False
     assert result.scopeName == "Cluster-A Management"
     assert str(result.network) == "10.20.30.0"
     assert str(result.subnetMask) == "255.255.255.0"
@@ -128,18 +145,17 @@ async def test_assemble_scope_state(
 async def test_assemble_scope_no_failover(
     mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw
 ):
-    def fake_run_ps(cmd, parse_json=True):
-        if "Get-DhcpServerv4Scope" in cmd:
-            return mock_ps_scope_raw
-        if "Get-DhcpServerv4OptionValue" in cmd:
-            return mock_ps_options_raw
-        if "Get-DhcpServerv4ExclusionRange" in cmd:
-            return mock_ps_exclusions_raw
-        if "Get-DhcpServerv4Failover" in cmd:
-            raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
-        return None
-
-    with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
+    with patch(
+        "app.services.ps_parsers.run_ps",
+        new=AsyncMock(
+            return_value=_scope_state(
+                mock_ps_scope_raw,
+                mock_ps_options_raw,
+                mock_ps_exclusions_raw,
+                None,
+            )
+        ),
+    ):
         result = await assemble_scope_state("10.20.30.0")
 
     assert result.failover is None
@@ -147,18 +163,10 @@ async def test_assemble_scope_no_failover(
 
 @pytest.mark.asyncio
 async def test_assemble_scope_empty_exclusions(mock_ps_scope_raw, mock_ps_options_raw):
-    def fake_run_ps(cmd, parse_json=True):
-        if "Get-DhcpServerv4Scope" in cmd:
-            return mock_ps_scope_raw
-        if "Get-DhcpServerv4OptionValue" in cmd:
-            return mock_ps_options_raw
-        if "Get-DhcpServerv4ExclusionRange" in cmd:
-            raise PowerShellError(cmd, "Cannot find exclusion range for scope", 1)
-        if "Get-DhcpServerv4Failover" in cmd:
-            raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
-        return None
-
-    with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
+    with patch(
+        "app.services.ps_parsers.run_ps",
+        new=AsyncMock(return_value=_scope_state(mock_ps_scope_raw, mock_ps_options_raw)),
+    ):
         result = await assemble_scope_state("10.20.30.0")
 
     assert result.exclusions == []
@@ -172,19 +180,115 @@ async def test_exclusions_sorted_by_ip(mock_ps_scope_raw, mock_ps_options_raw):
         {"StartRange": "10.20.30.1", "EndRange": "10.20.30.99"},
     ]
 
-    def fake_run_ps(cmd, parse_json=True):
-        if "Get-DhcpServerv4Scope" in cmd:
-            return mock_ps_scope_raw
-        if "Get-DhcpServerv4OptionValue" in cmd:
-            return mock_ps_options_raw
-        if "Get-DhcpServerv4ExclusionRange" in cmd:
-            return unsorted_exclusions
-        if "Get-DhcpServerv4Failover" in cmd:
-            raise PowerShellError(cmd, "Cannot find failover relationship for scope", 1)
-        return None
-
-    with patch("app.services.ps_parsers.run_ps", side_effect=fake_run_ps):
+    with patch(
+        "app.services.ps_parsers.run_ps",
+        new=AsyncMock(
+            return_value=_scope_state(
+                mock_ps_scope_raw,
+                mock_ps_options_raw,
+                unsorted_exclusions,
+                None,
+            )
+        ),
+    ):
         result = await assemble_scope_state("10.20.30.0")
 
     assert str(result.exclusions[0].startAddress) == "10.20.30.1"
     assert str(result.exclusions[1].startAddress) == "10.20.30.201"
+
+
+@pytest.mark.asyncio
+async def test_assemble_scope_no_exclusions_and_no_failover(mock_ps_scope_raw, mock_ps_options_raw):
+    with patch(
+        "app.services.ps_parsers.run_ps",
+        new=AsyncMock(return_value=_scope_state(mock_ps_scope_raw, mock_ps_options_raw)),
+    ):
+        result = await assemble_scope_state("10.20.30.0")
+
+    assert result.exclusions == []
+    assert result.failover is None
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exclusion_error_still_raises():
+    err = PowerShellError("Get-DhcpServerv4ExclusionRange", "Access denied", 5)
+    with patch("app.services.ps_parsers.run_ps", new=AsyncMock(side_effect=err)):
+        with pytest.raises(PowerShellError):
+            await assemble_scope_state("10.20.30.0")
+
+
+@pytest.mark.asyncio
+async def test_unexpected_failover_error_still_raises():
+    err = PowerShellError("Get-DhcpServerv4Failover", "RPC server unavailable", 1722)
+    with patch("app.services.ps_parsers.run_ps", new=AsyncMock(side_effect=err)):
+        with pytest.raises(PowerShellError):
+            await assemble_scope_state("10.20.30.0")
+
+
+def test_single_option_object_is_normalized_to_list(mock_ps_scope_raw, mock_ps_exclusions_raw):
+    state = normalize_get_scope_state(
+        _scope_state(
+            mock_ps_scope_raw,
+            {"OptionId": 3, "Value": ["10.20.30.1"]},
+            mock_ps_exclusions_raw,
+        )
+    )
+    assert state["options"] == [{"OptionId": 3, "Value": ["10.20.30.1"]}]
+
+
+def test_single_exclusion_object_is_normalized_to_list(mock_ps_scope_raw, mock_ps_options_raw):
+    state = normalize_get_scope_state(
+        _scope_state(
+            mock_ps_scope_raw,
+            mock_ps_options_raw,
+            {"StartRange": "10.20.30.1", "EndRange": "10.20.30.99"},
+        )
+    )
+    assert state["exclusions"] == [{"StartRange": "10.20.30.1", "EndRange": "10.20.30.99"}]
+
+
+def test_returned_payload_comparable_with_post_put_body(
+    mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw
+):
+    state = normalize_get_scope_state(
+        _scope_state(mock_ps_scope_raw, mock_ps_options_raw, mock_ps_exclusions_raw)
+    )
+    result = build_payload_from_scope_state("10.20.30.0", state)
+
+    assert result.model_dump(mode="json") == {
+        "scopeName": "Cluster-A Management",
+        "network": "10.20.30.0",
+        "subnetMask": "255.255.255.0",
+        "startRange": "10.20.30.100",
+        "endRange": "10.20.30.200",
+        "leaseDurationDays": 8,
+        "description": "Cluster A management network",
+        "gateway": "10.20.30.1",
+        "dnsServers": ["10.0.0.53", "10.0.0.54"],
+        "dnsDomain": "lab.local",
+        "exclusions": [{"startAddress": "10.20.30.1", "endAddress": "10.20.30.99"}],
+        "failover": None,
+    }
+
+
+def test_invalid_or_unsafe_scope_id_cannot_inject_powershell():
+    with pytest.raises(InvalidScopeIdError):
+        build_get_scope_state_script("10.20.30.0'; Remove-DhcpServerv4Scope -Force; '")
+
+
+def test_ps_single_quote_escapes_embedded_single_quote():
+    assert ps_single_quote("a'b") == "'a''b'"
+
+
+def test_get_scope_state_script_contains_depth_10_and_single_scope_literal():
+    script = build_get_scope_state_script("10.20.30.0")
+    assert "$ScopeId = '10.20.30.0'" in script
+    assert "ConvertTo-Json -Depth 10 -Compress" in script
+    assert "Get-DhcpServerv4Scope -ScopeId $ScopeId -ErrorAction Stop" in script
+
+
+def test_get_scope_state_script_rethrows_unexpected_optional_errors():
+    script = build_get_scope_state_script("10.20.30.0")
+    assert "Test-DhcpNoExclusions" in script
+    assert "Test-DhcpNoFailover" in script
+    assert script.count("throw") == 2
