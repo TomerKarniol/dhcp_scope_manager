@@ -23,6 +23,8 @@ import subprocess
 import threading
 import time
 
+from app.utils.decorators import log_call
+
 logger = logging.getLogger(__name__)
 
 
@@ -263,6 +265,7 @@ def validate_dhcp_environment() -> None:
         _cache_exc = None
 
 
+@log_call
 def check_health() -> dict:
     validate_dhcp_environment()
     return {"status": "ok"}

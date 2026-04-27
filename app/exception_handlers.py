@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -27,18 +26,7 @@ def _sanitize_text(value: str, *, max_len: int = _MAX_PS_ERROR_LEN) -> str:
     return sanitized[:max_len]
 
 
-def _request_id(request: Request) -> str:
-    existing = getattr(request.state, "request_id", None)
-    if existing:
-        return existing
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    request.state.request_id = request_id
-    return request_id
-
-
 def _error_content(
-    request: Request,
-    *,
     code: str,
     message: str,
     details: dict[str, Any] | None = None,
@@ -48,26 +36,21 @@ def _error_content(
             "code": code,
             "message": message,
             "details": details or {},
-            "requestId": _request_id(request),
         }
     }
 
 
 def _error_response(
-    request: Request,
-    *,
     status_code: int,
     code: str,
     message: str,
     details: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
-    response_headers = dict(headers or {})
-    response_headers.setdefault("X-Request-ID", _request_id(request))
     return JSONResponse(
         status_code=status_code,
-        content=_error_content(request, code=code, message=message, details=details),
-        headers=response_headers,
+        content=_error_content(code=code, message=message, details=details),
+        headers=headers,
     )
 
 
@@ -123,15 +106,13 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         logger.info(
-            "Application error on %s %s [%s] request_id=%s: %s",
+            "Application error on %s %s [%s]: %s",
             request.method,
             request.url.path,
             exc.code,
-            _request_id(request),
             exc.message,
         )
         return _error_response(
-            request,
             status_code=exc.status_code,
             code=exc.code,
             message=exc.message,
@@ -144,15 +125,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request, exc: DhcpEnvironmentError
     ) -> JSONResponse:
         logger.error(
-            "DHCP environment error on %s %s [%s] request_id=%s: %s",
+            "DHCP environment error on %s %s [%s]: %s",
             request.method,
             request.url.path,
             exc.reason,
-            _request_id(request),
             exc.detail,
         )
         return _error_response(
-            request,
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             code=ErrorCode.DHCP_ENVIRONMENT_UNAVAILABLE,
             message=_dhcp_env_message(exc.reason),
@@ -165,14 +144,12 @@ def register_exception_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         errors = _validation_errors(exc)
         logger.info(
-            "Request validation failed on %s %s request_id=%s: %s",
+            "Request validation failed on %s %s: %s",
             request.method,
             request.url.path,
-            _request_id(request),
             errors,
         )
         return _error_response(
-            request,
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             code=ErrorCode.VALIDATION_ERROR,
             message="Request validation failed",
@@ -184,15 +161,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
         logger.info(
-            "HTTP error on %s %s [%s] request_id=%s: %s",
+            "HTTP error on %s %s [%s]: %s",
             request.method,
             request.url.path,
             exc.status_code,
-            _request_id(request),
             exc.detail,
         )
         return _error_response(
-            request,
             status_code=exc.status_code,
             code=_http_error_code(exc.status_code),
             message=_http_error_message(exc),
@@ -204,10 +179,9 @@ def register_exception_handlers(app: FastAPI) -> None:
         safe_stderr = _sanitize_text(exc.stderr)
         safe_command = redact_powershell_command(exc.command)
         logger.error(
-            "PowerShell error on %s %s request_id=%s rc=%s cmd=%r stderr=%r",
+            "PowerShell error on %s %s rc=%s cmd=%r stderr=%r",
             request.method,
             request.url.path,
-            _request_id(request),
             exc.returncode,
             safe_command,
             safe_stderr,
@@ -216,7 +190,6 @@ def register_exception_handlers(app: FastAPI) -> None:
 
         if exc.returncode == -1:
             return _error_response(
-                request,
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 code=ErrorCode.POWERSHELL_TIMEOUT,
                 message="Timed out while waiting for DHCP PowerShell command to finish",
@@ -224,14 +197,12 @@ def register_exception_handlers(app: FastAPI) -> None:
 
         if _is_already_exists_error(exc.stderr):
             return _error_response(
-                request,
                 status_code=status.HTTP_409_CONFLICT,
                 code=ErrorCode.DHCP_CONFLICT,
                 message="DHCP state conflicts with the requested operation",
             )
 
         return _error_response(
-            request,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             code=ErrorCode.POWERSHELL_COMMAND_FAILED,
             message="Failed to apply DHCP scope configuration",
@@ -240,13 +211,11 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.exception(
-            "Unhandled error on %s %s request_id=%s",
+            "Unhandled error on %s %s",
             request.method,
             request.url.path,
-            _request_id(request),
         )
         return _error_response(
-            request,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             code=ErrorCode.INTERNAL_ERROR,
             message="Internal server error",

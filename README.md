@@ -36,6 +36,7 @@ app/
   exception_handlers.py      Global exception → standard JSON error response mapping
   dependencies/
     auth.py                  Bearer token verification (verify_token dependency)
+    dhcp.py                  DHCP runtime environment guard dependency
     scopes.py                scope_id and request body validation (validate_scope_id, validate_scope_request)
   models/
     __init__.py              Re-exports DhcpScopePayload, DhcpFailover, DhcpExclusion
@@ -137,8 +138,7 @@ All API errors use the same envelope:
   "error": {
     "code": "SCOPE_NOT_FOUND",
     "message": "DHCP scope 10.20.30.0 was not found",
-    "details": {},
-    "requestId": "..."
+    "details": {}
   }
 }
 ```
@@ -146,9 +146,8 @@ All API errors use the same envelope:
 - `error.code` is stable and machine-readable for Crossplane events and automation.
 - `error.message` is human-readable and safe to expose.
 - `error.details` contains sanitized structured context such as `scopeId`, `network`, validation errors, or DHCP environment `reason`.
-- `error.requestId` is also returned as the `X-Request-ID` header. If the caller sends `X-Request-ID`, the API preserves it.
 
-Raw PowerShell commands, shared secrets, stack traces, and full internal stderr are not returned to clients. Backend logs include the exception type, request path, request ID, sanitized command, sanitized stderr, and traceback where useful.
+Raw PowerShell commands, shared secrets, stack traces, and full internal stderr are not returned to clients. Backend logs include the exception type, request path, sanitized command, sanitized stderr, and traceback where useful.
 
 Common error codes:
 
@@ -180,8 +179,7 @@ Validation errors include compact field entries:
           "type": "ip_v4_address"
         }
       ]
-    },
-    "requestId": "..."
+    }
   }
 }
 ```
@@ -448,7 +446,6 @@ From Crossplane events:
 1. Read `error.code` first. It is stable and safe to use for automation.
 2. Use `error.message` for the short human explanation.
 3. Use `error.details` for safe context such as `scopeId`, body validation fields, or DHCP environment `reason`.
-4. Copy `error.requestId` and search backend logs for the same request ID.
 
 From backend logs:
 
@@ -456,7 +453,7 @@ From backend logs:
 - `RequestValidationError` entries include sanitized validation fields and messages, not raw input values.
 - `PowerShellError` entries include return code, sanitized command, sanitized stderr, and traceback.
 - `DhcpEnvironmentError` entries include the full internal environment failure detail.
-- `INTERNAL_ERROR` responses mean an unexpected Python exception reached the fallback handler; inspect the traceback by `requestId`.
+- `INTERNAL_ERROR` responses mean an unexpected Python exception reached the fallback handler; inspect backend logs for the request path and timestamp.
 
 Crossplane-specific behavior:
 

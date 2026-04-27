@@ -3,19 +3,16 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Response, status
 
 from app.dependencies.auth import verify_token
+from app.dependencies.dhcp import require_dhcp_service
 from app.dependencies.scopes import validate_scope_id, validate_scope_request
 from app.models import DhcpScopePayload
-from app.services import dhcp_service, scope_service
-
-
-def _require_dhcp_service() -> None:
-    dhcp_service.validate_dhcp_environment()
+from app.services import scope_service
 
 
 router = APIRouter(
     prefix="/api/v1",
     tags=["scopes"],
-    dependencies=[Depends(verify_token), Depends(_require_dhcp_service)],
+    dependencies=[Depends(verify_token), Depends(require_dhcp_service)],
 )
 
 
