@@ -1,21 +1,38 @@
 from __future__ import annotations
 from typing import Literal, Optional
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DhcpFailover(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     partnerServer: str = Field(
         min_length=1,
         max_length=255,
         description="FQDN of the partner DHCP server",
         examples=["dhcp02.lab.local"],
     )
+
+    @field_validator("partnerServer")
+    @classmethod
+    def partner_server_not_whitespace_only(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("partnerServer must not be blank or whitespace-only")
+        return v
+
     relationshipName: str = Field(
         min_length=1,
         max_length=64,
         description="Failover relationship name (unique per DHCP server pair)",
         examples=["mce1-failover"],
     )
+
+    @field_validator("relationshipName")
+    @classmethod
+    def relationship_name_not_whitespace_only(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("relationshipName must not be blank or whitespace-only")
+        return v
     mode: Literal["HotStandby", "LoadBalance"] = Field(
         description="Failover mode: HotStandby (active/standby) or LoadBalance"
     )

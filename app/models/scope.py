@@ -1,7 +1,7 @@
 from __future__ import annotations
 from ipaddress import IPv4Address, IPv4Network
 from typing import Optional
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.utils.ip_utils import ip_to_int
 
@@ -10,6 +10,8 @@ from app.models.failover import DhcpFailover
 
 
 class DhcpScopePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     # Field ordering is CRITICAL — Crossplane compares GET response to PUT body byte-for-byte.
     # Do NOT reorder these fields.
     scopeName: str = Field(
@@ -75,6 +77,15 @@ class DhcpScopePayload(BaseModel):
         description="DNS domain suffix sent to clients (DHCP option 15)",
         examples=["lab.local"],
     )
+
+    @field_validator("dnsDomain", mode="before")
+    @classmethod
+    def normalize_dns_domain(cls, v: object) -> object:
+        """Normalize null/None to '' — consistent with description field behavior."""
+        if v is None:
+            return ""
+        return v
+
     exclusions: list[DhcpExclusion] = Field(
         default_factory=list,
         description="IP ranges excluded from distribution, sorted by startAddress",
@@ -83,6 +94,16 @@ class DhcpScopePayload(BaseModel):
         default=None,
         description="Failover configuration. null = no failover configured.",
     )
+
+    @model_validator(mode="after")
+    def sort_exclusions(self) -> "DhcpScopePayload":
+        """Normalize exclusion list to ascending IP order — ensures GET/PUT parity."""
+        if len(self.exclusions) > 1:
+            self.exclusions = sorted(
+                self.exclusions,
+                key=lambda x: (ip_to_int(x.startAddress), ip_to_int(x.endAddress)),
+            )
+        return self
 
     @model_validator(mode="after")
     def no_duplicate_exclusions(self) -> "DhcpScopePayload":

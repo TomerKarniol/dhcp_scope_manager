@@ -350,3 +350,59 @@ class TestDuplicateExclusionValidation:
     def test_no_exclusions_accepted(self):
         scope = _make_scope(exclusions=[])
         assert scope.exclusions == []
+
+
+# ---------------------------------------------------------------------------
+# 8. models: exclusion order normalized to ascending IP
+# ---------------------------------------------------------------------------
+
+class TestExclusionOrderNormalization:
+    def test_unsorted_exclusions_normalized_to_ascending_order(self):
+        """Exclusions provided in descending IP order must be stored in ascending order."""
+        scope = _make_scope(exclusions=[
+            DhcpExclusion(startAddress="10.20.30.51", endAddress="10.20.30.60"),
+            DhcpExclusion(startAddress="10.20.30.1", endAddress="10.20.30.10"),
+        ])
+        assert str(scope.exclusions[0].startAddress) == "10.20.30.1"
+        assert str(scope.exclusions[1].startAddress) == "10.20.30.51"
+
+    def test_already_sorted_exclusions_unchanged(self):
+        """Exclusions already in ascending order must remain unchanged."""
+        scope = _make_scope(exclusions=[
+            DhcpExclusion(startAddress="10.20.30.1", endAddress="10.20.30.10"),
+            DhcpExclusion(startAddress="10.20.30.51", endAddress="10.20.30.60"),
+        ])
+        assert str(scope.exclusions[0].startAddress) == "10.20.30.1"
+        assert str(scope.exclusions[1].startAddress) == "10.20.30.51"
+
+
+# ---------------------------------------------------------------------------
+# 9. models: extra fields rejected
+# ---------------------------------------------------------------------------
+
+class TestExtraFieldsRejected:
+    def test_scope_payload_extra_field_rejected(self):
+        """Unknown fields on DhcpScopePayload must be rejected."""
+        with pytest.raises(ValidationError):
+            _make_scope(unknownField="unexpected")
+
+    def test_failover_extra_field_rejected(self):
+        """Unknown fields on DhcpFailover must be rejected."""
+        with pytest.raises(ValidationError):
+            DhcpFailover(
+                partnerServer="dhcp02.lab.local",
+                relationshipName="rel1",
+                mode="HotStandby",
+                serverRole="Active",
+                maxClientLeadTimeMinutes=60,
+                unknownField="unexpected",
+            )
+
+    def test_exclusion_extra_field_rejected(self):
+        """Unknown fields on DhcpExclusion must be rejected."""
+        with pytest.raises(ValidationError):
+            DhcpExclusion(
+                startAddress="10.20.30.1",
+                endAddress="10.20.30.10",
+                unknownField="unexpected",
+            )

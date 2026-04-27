@@ -1,9 +1,11 @@
 from __future__ import annotations
 from ipaddress import IPv4Address
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DhcpExclusion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     startAddress: IPv4Address = Field(
         description="First IP address in the exclusion range",
         examples=["10.20.30.1"],

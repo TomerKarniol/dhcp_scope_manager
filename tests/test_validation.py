@@ -643,3 +643,47 @@ def test_non_overlapping_exclusions_accepted():
             {"startAddress": "10.20.30.20", "endAddress": "10.20.30.30"},
         ]
     ))  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# partnerServer / relationshipName whitespace-only rejection
+# ---------------------------------------------------------------------------
+
+def test_partner_server_whitespace_only_rejected():
+    """partnerServer of only spaces must be rejected."""
+    with pytest.raises(ValidationError) as exc_info:
+        DhcpFailover(
+            partnerServer="   ",
+            relationshipName="rel1",
+            mode="HotStandby",
+            serverRole="Active",
+            maxClientLeadTimeMinutes=60,
+        )
+    assert "whitespace" in str(exc_info.value).lower() or "blank" in str(exc_info.value).lower()
+
+
+def test_relationship_name_whitespace_only_rejected():
+    """relationshipName of only spaces must be rejected."""
+    with pytest.raises(ValidationError) as exc_info:
+        DhcpFailover(
+            partnerServer="dhcp02.lab.local",
+            relationshipName="   ",
+            mode="HotStandby",
+            serverRole="Active",
+            maxClientLeadTimeMinutes=60,
+        )
+    assert "whitespace" in str(exc_info.value).lower() or "blank" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# dnsDomain null normalization
+# ---------------------------------------------------------------------------
+
+def test_dns_domain_none_normalizes_to_empty_string():
+    """dnsDomain=None must normalize to '' — consistent with description field."""
+    scope = DhcpScopePayload(
+        scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
+        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        description="", gateway="10.0.0.1", dnsServers=[], dnsDomain=None, exclusions=[],
+    )
+    assert scope.dnsDomain == ""
