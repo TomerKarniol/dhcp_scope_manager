@@ -77,6 +77,16 @@ LOGGING_CONFIG = {
 #         "level": "INFO",
 #     },
 # }
+# def configure_logging(level: str = "INFO") -> None:
+#     Path("logs").mkdir(parents=True, exist_ok=True)
+
+#     logging.config.dictConfig({
+#         **LOGGING_CONFIG,
+#         "root": {
+#             "handlers": ["console", "file"],
+#             "level": level.upper(),
+#         },
+#     })
 
 
 def configure_logging(level: str = "INFO") -> None:
