@@ -68,6 +68,7 @@ class DhcpScopePayload(BaseModel):
     )
     dnsServers: list[IPv4Address] = Field(
         default_factory=list,
+        min_length=1,
         description="Ordered list of DNS server IPs sent to clients (DHCP option 6)",
         examples=[["10.0.0.53", "10.0.0.54"]],
     )
