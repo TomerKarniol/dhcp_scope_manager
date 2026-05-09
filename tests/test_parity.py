@@ -90,7 +90,6 @@ def _ps_failover(**overrides) -> dict:
         "ReservePercent": 5,
         "LoadBalancePercent": 0,  # canonical: Windows does not use this field for HotStandby
         "MaxClientLeadTime": "1:00:00",
-        "SharedSecret": None,
     }
     base.update(overrides)
     return base
@@ -315,11 +314,7 @@ class TestFailoverParity:
         assert got["failover"] is None
 
     def test_failover_all_fields_present(self):
-        """All observed failover fields must be present.
-
-        sharedSecret is deliberately excluded because Windows exposes only
-        EnableAuth, not the plaintext secret.
-        """
+        """All observed failover fields must be present."""
         got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(), failover_raw=_ps_failover())
         f = got["failover"]
         required_fields = {
@@ -384,25 +379,6 @@ class TestFailoverParity:
         got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(),
                         failover_raw=_ps_failover(MaxClientLeadTime="1.00:00:00"))
         assert got["failover"]["maxClientLeadTimeMinutes"] == 1440
-
-    def test_failover_shared_secret_absent_when_not_set(self):
-        """sharedSecret is write-only and must not appear in observed state."""
-        got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(),
-                        failover_raw=_ps_failover(SharedSecret=None))
-        assert "sharedSecret" not in got["failover"]
-
-    def test_failover_shared_secret_empty_string_not_returned(self):
-        """PS returning any SharedSecret value must not expose it."""
-        got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(),
-                        failover_raw=_ps_failover(SharedSecret=""))
-        assert "sharedSecret" not in got["failover"]
-
-    def test_failover_shared_secret_present_not_returned(self):
-        got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(),
-                        failover_raw=_ps_failover(SharedSecret="mysecret"))
-        assert "sharedSecret" not in got["failover"]
-        assert "mysecret" not in json.dumps(got)
-
 
 # ---------------------------------------------------------------------------
 # Full end-to-end parity: GET response must equal PUT body

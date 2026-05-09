@@ -7,8 +7,10 @@ from fastapi import Body, Depends
 
 from app.errors import InvalidScopeIdError, ScopeIdMismatchError
 from app.models import DhcpScopePayload
+from app.utils.decorators import log_call
 
 
+@log_call
 async def validate_scope_id(scope_id: str) -> str:
     try:
         IPv4Address(scope_id)
@@ -17,6 +19,7 @@ async def validate_scope_id(scope_id: str) -> str:
     return scope_id
 
 
+@log_call
 async def validate_scope_request(
     payload: Annotated[DhcpScopePayload, Body(...)],
     scope_id: str = Depends(validate_scope_id),

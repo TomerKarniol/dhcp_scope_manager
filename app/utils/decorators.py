@@ -13,6 +13,7 @@ R = TypeVar("R")
 def log_call(func: Callable[P, R]) -> Callable[P, R]:
     """Log entry, exit, and wall-clock duration of any service function."""
     logger = logging.getLogger(func.__module__)
+    signature = inspect.signature(func, eval_str=True)
 
     if inspect.iscoroutinefunction(func):
         @functools.wraps(func)
@@ -27,6 +28,7 @@ def log_call(func: Callable[P, R]) -> Callable[P, R]:
                 logger.info("← %s raised (%.3fs)", func.__name__, time.monotonic() - t0)
                 raise
 
+        async_wrapper.__signature__ = signature  # type: ignore[attr-defined]
         return cast(Callable[P, R], async_wrapper)
 
     @functools.wraps(func)
@@ -41,4 +43,5 @@ def log_call(func: Callable[P, R]) -> Callable[P, R]:
             logger.info("← %s raised (%.3fs)", func.__name__, time.monotonic() - t0)
             raise
 
+    wrapper.__signature__ = signature  # type: ignore[attr-defined]
     return wrapper

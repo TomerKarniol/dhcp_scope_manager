@@ -45,13 +45,6 @@ def test_lease_duration_is_int(sample_scope_payload):
     assert data["leaseDurationDays"] == 8
 
 
-def test_failover_shared_secret_null(sample_failover):
-    data = sample_failover.model_dump(mode="json")
-    assert "sharedSecret" not in data
-    serialized = json.dumps(data)
-    assert "sharedSecret" not in serialized
-
-
 def test_dns_servers_empty_rejected():
     with pytest.raises(ValidationError):
         DhcpScopePayload(

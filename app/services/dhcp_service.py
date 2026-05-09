@@ -241,6 +241,7 @@ async def _check_dhcp_cmdlets() -> None:
 # Public validator
 # ---------------------------------------------------------------------------
 
+@log_call
 async def validate_dhcp_environment() -> None:
     """Validate that this runtime can perform DHCP automation via Windows PowerShell.
 

@@ -158,7 +158,6 @@ async def test_assemble_scope_state(
     assert result.failover is not None
     assert result.failover.relationshipName == "mce1-failover"
     assert result.failover.maxClientLeadTimeMinutes == 60
-    assert result.failover.sharedSecret is None
 
 
 @pytest.mark.asyncio
@@ -300,13 +299,6 @@ def test_build_payload_without_dns_servers_is_invalid_managed_state(mock_ps_scop
     )
     with pytest.raises(DhcpConflictError):
         build_payload_from_scope_state("10.20.30.0", state)
-
-
-def test_parse_failover_does_not_return_shared_secret(mock_ps_failover_raw):
-    raw = {**mock_ps_failover_raw, "SharedSecret": "server-secret"}
-    result = parse_failover(raw)
-    assert result.sharedSecret is None
-    assert "sharedSecret" not in result.model_dump(mode="json")
 
 
 def test_invalid_or_unsafe_scope_id_cannot_inject_powershell():

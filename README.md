@@ -84,7 +84,7 @@ tests/
   test_parity.py             GET/PUT parity — the main guard against Crossplane reconciliation loops
   test_edge_cases.py         Edge cases and boundary conditions
   test_helm.py               Helm-rendered Crossplane Request contract
-  test_security.py           PowerShell escaping, response sanitization, and secret redaction
+  test_security.py           PowerShell escaping and response sanitization
   test_service_unit.py       Focused scope_service create/get/delete/list behavior
 ```
 
@@ -203,7 +203,7 @@ All API errors use the same envelope:
 - `error.message` is human-readable and safe to expose.
 - `error.details` contains sanitized structured context such as `scopeId`, `network`, validation errors, or DHCP environment `reason`.
 
-Raw PowerShell commands, shared secrets, stack traces, and full internal stderr are not returned to clients. Backend logs use safe context such as request path, `scope_id`, operation name, return code, and sanitized stderr previews.
+Raw PowerShell commands, stack traces, and full internal stderr are not returned to clients. Backend logs use safe context such as request path, `scope_id`, operation name, return code, and sanitized stderr previews.
 
 Common error codes:
 
@@ -398,12 +398,6 @@ Supported modes: `HotStandby`, `LoadBalance`
 Normalization at both the Helm template layer and the Pydantic model layer prevents GET/PUT drift
 when values include cross-mode fields.
 
-`sharedSecret` is write-only apply input. Microsoft DHCP PowerShell accepts `-SharedSecret`
-on `Add-DhcpServerv4Failover` / `Set-DhcpServerv4Failover`, but `Get-DhcpServerv4Failover`
-does not return the plaintext secret. The backend therefore accepts `sharedSecret` on direct
-POST/PUT input, uses it only while applying failover, and excludes it from GET/list responses,
-logs, and Helm-rendered comparison bodies.
-
 ## Helm Chart
 
 The chart under `helm/` renders a single Crossplane `Request` CR.
@@ -417,8 +411,6 @@ Key behaviors:
   minimal existing render-time checks needed to form the Request URL/name.
 - **Optional defaults** — `description` and `dns.domain` render as `""`, `exclusions` renders as
   `[]`, and disabled failover renders as `null`.
-- **Failover shared secret** — intentionally not rendered into `payload.body`, because Windows
-  does not return it on GET and Crossplane would otherwise see perpetual drift or expose a secret.
 - **`providerConfigRef.name`** is configurable via `crossplane.providerConfigName`
   (defaults to `dhcp-http`).
 
@@ -504,8 +496,6 @@ validate-dhcp-values:
 - Bearer token auth via `DHCP_API_TOKEN` — optional; disabled when unset
 - Runtime environment guard rejects all scope operations on non-Windows / non-DHCP hosts
 - `-ErrorAction Stop` on every PowerShell command
-- Shared secrets are write-only and are never returned by GET/list responses
-- Shared secrets are never logged
 - PowerShell stderr is sanitized before returning to clients and before logging previews
 - Structured JSON logs include safe fields such as `scope_id`, `operation`, `relationship_name`,
   `duration_ms`, `status`, and `error_code`
@@ -549,7 +539,7 @@ Test coverage includes:
 - Runtime environment guard behavior
 - GET/PUT parity contract — the main guard against Crossplane reconciliation loops
 - Helm-rendered Crossplane Request contract
-- Security checks for PowerShell escaping, response sanitization, and secret redaction
+- Security checks for PowerShell escaping and response sanitization
 
 The repository virtualenv is preferred because the system Python may not have runtime dependencies such as `pydantic-settings` installed.
 

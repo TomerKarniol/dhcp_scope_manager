@@ -336,7 +336,6 @@ class TestHelmFailoverRendering:
             serverRole="Active",
             reservePercent=5,
             maxClientLeadTimeMinutes=60,
-            sharedSecret=None,
         )
         body = self._body(values)
         f = body["failover"]
@@ -355,7 +354,6 @@ class TestHelmFailoverRendering:
             mode="LoadBalance",
             loadBalancePercent=50,
             maxClientLeadTimeMinutes=60,
-            sharedSecret=None,
         )
         body = self._body(values)
         f = body["failover"]
@@ -373,25 +371,9 @@ class TestHelmFailoverRendering:
             serverRole="Active",
             reservePercent=5,
             maxClientLeadTimeMinutes=60,
-            sharedSecret=None,
         )
         body = self._body(values)
         assert body["failover"]["loadBalancePercent"] == 0
-
-    def test_shared_secret_not_rendered_in_payload_body(self):
-        values = _values_with_failover(
-            partnerServer="dhcp02.lab.local",
-            relationshipName="rel1",
-            mode="HotStandby",
-            serverRole="Active",
-            reservePercent=5,
-            maxClientLeadTimeMinutes=60,
-            sharedSecret="super-secret",
-        )
-        body = self._body(values)
-        assert "sharedSecret" not in body["failover"]
-        assert "super-secret" not in json.dumps(body)
-
 
 class TestHelmSecretInjection:
 

@@ -67,25 +67,6 @@ class DhcpFailover(BaseModel):
         le=1440,
         description="Max client lead time in minutes (1–1440, i.e. up to 24 hours)",
     )
-    sharedSecret: Optional[str] = Field(
-        default=None,
-        max_length=256,
-        exclude=True,
-        description=(
-            "Write-only shared secret for failover authentication. "
-            "Accepted on create/update, never returned by GET/list responses. "
-            "Empty string is normalized to null."
-        ),
-    )
-
-    @field_validator("sharedSecret", mode="before")
-    @classmethod
-    def normalize_shared_secret(cls, v: object) -> object:
-        """Normalize empty string to null — allows sharedSecret: '' in values.yaml."""
-        if v == "":
-            return None
-        return v
-
     @model_validator(mode="after")
     def enforce_mode_fields(self) -> "DhcpFailover":
         """Normalize and validate mode-specific fields.

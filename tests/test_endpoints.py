@@ -85,28 +85,6 @@ async def test_get_missing_scope():
     assert "10.20.30.0" in err["message"]
 
 
-async def test_get_failover_response_does_not_include_shared_secret():
-    from app.models import DhcpFailover
-
-    scope = _make_scope(
-        failover=DhcpFailover(
-            partnerServer="dhcp02.lab.local",
-            relationshipName="rel1",
-            mode="HotStandby",
-            serverRole="Active",
-            reservePercent=5,
-            maxClientLeadTimeMinutes=60,
-            sharedSecret="TOP-SECRET",
-        )
-    )
-    with patch("app.services.scope_service.assemble_scope_state", return_value=scope):
-        r = await client.get("/api/v1/scopes/10.20.30.0")
-
-    assert r.status_code == 200
-    assert "sharedSecret" not in r.text
-    assert "TOP-SECRET" not in r.text
-
-
 # ---------------------------------------------------------------------------
 # POST
 # ---------------------------------------------------------------------------
@@ -196,7 +174,6 @@ async def test_post_by_scope_id_with_hotstandby_failover():
         "reservePercent": 5,
         "loadBalancePercent": 0,
         "maxClientLeadTimeMinutes": 60,
-        "sharedSecret": None,
     }
     body = _make_scope_dict(failover=failover_dict)
     created = _make_scope(failover=DhcpScopePayload(**body).failover)
@@ -210,7 +187,7 @@ async def test_post_by_scope_id_with_hotstandby_failover():
     assert called_payload.failover.serverRole == "Active"
 
 
-async def test_post_accepts_shared_secret_but_response_excludes_it():
+async def test_post_rejects_unknown_failover_fields():
     failover_dict = {
         "partnerServer": "dhcp02.lab.local",
         "relationshipName": "rel1",
@@ -218,18 +195,12 @@ async def test_post_accepts_shared_secret_but_response_excludes_it():
         "serverRole": "Active",
         "reservePercent": 5,
         "maxClientLeadTimeMinutes": 60,
-        "sharedSecret": "TOP-SECRET",
+        "unexpectedField": "unexpected-value",
     }
     body = _make_scope_dict(failover=failover_dict)
-    created = _make_scope(failover=DhcpScopePayload(**body).failover)
-    with patch("app.services.scope_service.create_scope", return_value=created) as mock_create:
-        r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
+    r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
 
-    assert r.status_code == 200
-    called_payload = mock_create.call_args[0][0]
-    assert called_payload.failover.sharedSecret == "TOP-SECRET"
-    assert "sharedSecret" not in r.text
-    assert "TOP-SECRET" not in r.text
+    assert r.status_code == 422
 
 
 async def test_post_by_scope_id_with_loadbalance_failover():
@@ -240,7 +211,6 @@ async def test_post_by_scope_id_with_loadbalance_failover():
         "mode": "LoadBalance",
         "loadBalancePercent": 50,
         "maxClientLeadTimeMinutes": 60,
-        "sharedSecret": None,
     }
     body = _make_scope_dict(failover=failover_dict)
     from app.models import DhcpFailover

@@ -406,20 +406,6 @@ def test_end_range_is_broadcast_address_invalid():
     assert "endRange" in str(exc_info.value)
 
 
-def test_failover_empty_shared_secret_normalizes_to_null():
-    """sharedSecret='' normalizes to null — allows sharedSecret: '' in values.yaml."""
-    f = DhcpFailover(
-        partnerServer="dhcp02.lab.local",
-        relationshipName="rel1",
-        mode="HotStandby",
-        serverRole="Active",
-        reservePercent=5,
-        maxClientLeadTimeMinutes=60,
-        sharedSecret="",
-    )
-    assert f.sharedSecret is None
-
-
 # ---------------------------------------------------------------------------
 # DhcpFailover mode-specific field enforcement
 # ---------------------------------------------------------------------------
@@ -536,52 +522,6 @@ def test_description_empty_string_accepted():
         gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain="", exclusions=[],
     )
     assert scope.description == ""
-
-
-# ---------------------------------------------------------------------------
-# sharedSecret normalization
-# ---------------------------------------------------------------------------
-
-def test_shared_secret_empty_string_normalizes_to_none():
-    """sharedSecret='' must normalize to None — allows sharedSecret: '' in values.yaml."""
-    f = DhcpFailover(
-        partnerServer="dhcp02.lab.local",
-        relationshipName="rel1",
-        mode="HotStandby",
-        serverRole="Active",
-        reservePercent=5,
-        maxClientLeadTimeMinutes=60,
-        sharedSecret="",
-    )
-    assert f.sharedSecret is None
-
-
-def test_shared_secret_none_accepted():
-    """sharedSecret=None must be accepted (no authentication configured)."""
-    f = DhcpFailover(
-        partnerServer="dhcp02.lab.local",
-        relationshipName="rel1",
-        mode="HotStandby",
-        serverRole="Active",
-        reservePercent=5,
-        maxClientLeadTimeMinutes=60,
-        sharedSecret=None,
-    )
-    assert f.sharedSecret is None
-
-
-def test_shared_secret_value_accepted():
-    """A non-empty sharedSecret must be accepted and preserved."""
-    f = DhcpFailover(
-        partnerServer="dhcp02.lab.local",
-        relationshipName="rel1",
-        mode="HotStandby",
-        serverRole="Active",
-        reservePercent=5,
-        maxClientLeadTimeMinutes=60,
-        sharedSecret="mysecret",
-    )
-    assert f.sharedSecret == "mysecret"
 
 
 # ---------------------------------------------------------------------------

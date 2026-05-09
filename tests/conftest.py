@@ -32,7 +32,6 @@ def sample_failover():
         serverRole="Active",
         reservePercent=5,
         maxClientLeadTimeMinutes=60,
-        sharedSecret=None,
     )
 
 
@@ -120,5 +119,4 @@ def mock_ps_failover_raw():
         "ReservePercent": 5,
         "LoadBalancePercent": 0,  # canonical: Windows does not use this field for HotStandby
         "MaxClientLeadTime": "1:00:00",
-        "SharedSecret": None,
     }

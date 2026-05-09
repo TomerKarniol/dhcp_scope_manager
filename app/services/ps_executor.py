@@ -9,22 +9,17 @@ from app.services import dhcp_service
 
 logger = logging.getLogger(__name__)
 
-# Matches -SharedSecret "..." or PowerShell single-quoted strings ('a''b').
-_SECRET_RE = re.compile(
-    r"(-SharedSecret\s+)(\"[^\"]*\"|'(?:[^']|'')*')",
-    re.IGNORECASE,
-)
 _WIN_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s,;]+")
 _MAX_STDERR_PREVIEW_LEN = 500
 
 
 def redact_powershell_command(command: str) -> str:
-    """Remove sensitive parameter values from a command string before logging."""
-    return _SECRET_RE.sub(r"\1'***REDACTED***'", command)
+    """Return a command string safe for preview logging."""
+    return command
 
 
 def sanitize_powershell_text(value: str, *, max_len: int = _MAX_STDERR_PREVIEW_LEN) -> str:
-    """Remove high-risk infrastructure details and secrets from log/client text."""
+    """Remove high-risk infrastructure details from log/client text."""
     redacted = redact_powershell_command(value)
     redacted = _WIN_PATH_RE.sub("<path>", redacted)
     return redacted[:max_len]

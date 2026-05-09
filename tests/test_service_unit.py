@@ -41,7 +41,6 @@ def _make_failover(**overrides):
         serverRole="Active",
         reservePercent=5,
         maxClientLeadTimeMinutes=60,
-        sharedSecret=None,
     )
     base.update(overrides)
     return DhcpFailover(**base)
@@ -323,10 +322,9 @@ class TestGetScope:
 
 class TestFailoverCommandConstruction:
 
-    async def test_relationship_name_and_shared_secret_are_single_quoted(self):
+    async def test_relationship_name_is_single_quoted(self):
         failover = _make_failover(
             relationshipName="rel'$(evil)",
-            sharedSecret="sec'ret$`value",
         )
 
         with patch("app.services.scope_service.run_ps") as mock_ps:
@@ -335,7 +333,6 @@ class TestFailoverCommandConstruction:
 
         cmd = mock_ps.call_args.args[0]
         assert "-Name 'rel''$(evil)'" in cmd
-        assert "-SharedSecret 'sec''ret$`value'" in cmd
 
 
 # ─── delete_scope ─────────────────────────────────────────────────────────────

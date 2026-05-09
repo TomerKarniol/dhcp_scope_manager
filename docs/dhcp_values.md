@@ -189,8 +189,6 @@ failover:
 | `loadBalancePercent`       | integer | LoadBalance  | 0–100                             | % of requests handled by THIS server (LoadBalance only)       |
 | `maxClientLeadTimeMinutes` | integer | both modes   | 1–1440                            | Max client lead time in minutes (up to 24 hours)              |
 
-`sharedSecret` is intentionally not part of the Helm-rendered comparison body. The backend API accepts it as write-only direct POST/PUT input, but Windows DHCP does not return the plaintext value from `Get-DhcpServerv4Failover`, so including it in the observed desired state would either expose a secret or cause Crossplane drift.
-
 ### Changing failover
 
 Certain changes require the failover relationship to be removed and recreated:

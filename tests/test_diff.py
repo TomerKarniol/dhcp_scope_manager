@@ -130,7 +130,6 @@ def _make_failover(**overrides):
         serverRole="Active",
         reservePercent=5,
         maxClientLeadTimeMinutes=60,
-        sharedSecret=None,
     )
     defaults.update(overrides)
     return DhcpFailover(**defaults)
@@ -282,47 +281,6 @@ async def test_failover_partner_server_change_triggers_recreate():
     ps_commands = [c.args[0] for c in mock_ps.call_args_list if c.args]
     assert any("Remove-DhcpServerv4FailoverScope" in cmd for cmd in ps_commands)
     assert not any("Set-DhcpServerv4Failover" in cmd for cmd in ps_commands)
-
-
-async def test_failover_shared_secret_change_triggers_update():
-    """Adding a sharedSecret is a mutable change — must use Set-DhcpServerv4Failover."""
-    current = _make_scope(failover=_make_failover(sharedSecret=None))
-    desired = _make_scope(failover=_make_failover(sharedSecret="new-secret"))
-
-    from app.services import scope_service
-    with (
-        patch("app.services.scope_service.assemble_scope_state") as mock_assemble,
-        patch("app.services.scope_service.run_ps") as mock_ps,
-    ):
-        mock_assemble.side_effect = [current, desired]
-        mock_ps.return_value = None
-        await scope_service.update_scope(current.network, desired)
-
-    ps_commands = [c.args[0] for c in mock_ps.call_args_list if c.args]
-    assert any("Set-DhcpServerv4Failover" in cmd for cmd in ps_commands)
-    # SharedSecret must appear in the update command
-    set_cmd = next(cmd for cmd in ps_commands if "Set-DhcpServerv4Failover" in cmd)
-    assert "-SharedSecret" in set_cmd
-
-
-async def test_failover_shared_secret_not_logged_in_plain(caplog):
-    """Secret values must not appear in log output."""
-    import logging
-    current = _make_scope(failover=_make_failover(sharedSecret=None))
-    desired = _make_scope(failover=_make_failover(sharedSecret="super-secret-value"))
-
-    from app.services import scope_service
-    with (
-        patch("app.services.scope_service.assemble_scope_state") as mock_assemble,
-        patch("app.services.scope_service.run_ps") as mock_ps,
-        caplog.at_level(logging.INFO),
-    ):
-        mock_assemble.side_effect = [current, desired]
-        mock_ps.return_value = None
-        await scope_service.update_scope(current.network, desired)
-
-    # Secret value must NOT appear anywhere in captured log output
-    assert "super-secret-value" not in caplog.text
 
 
 async def test_scope_exists_reraises_on_permission_error():
@@ -528,7 +486,6 @@ def _make_lb_failover(**overrides):
         mode="LoadBalance",
         loadBalancePercent=50,
         maxClientLeadTimeMinutes=60,
-        sharedSecret=None,
     )
     base.update(overrides)
     return DhcpFailover(**base)

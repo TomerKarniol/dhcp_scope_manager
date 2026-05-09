@@ -6,6 +6,7 @@ from typing import Any
 from app.errors import DhcpConflictError, InvalidScopeIdError
 from app.models import DhcpExclusion, DhcpFailover, DhcpScopePayload
 from app.services.ps_executor import run_ps
+from app.utils.decorators import log_call
 from app.utils.ip_utils import ip_to_int, parse_timespan_days, parse_timespan_minutes
 from app.utils.powershell import ps_single_quote
 
@@ -121,7 +122,6 @@ def parse_failover(raw: dict) -> DhcpFailover:
         maxClientLeadTimeMinutes=parse_timespan_minutes(
             str(raw.get("MaxClientLeadTime", "1:00:00"))
         ),
-        sharedSecret=None,
     )
 
 
@@ -187,6 +187,7 @@ def build_payload_from_scope_state(scope_id: str, state: dict[str, Any]) -> Dhcp
     )
 
 
+@log_call
 async def assemble_scope_state(scope_id: str) -> DhcpScopePayload:
     """Query Windows DHCP once and assemble the canonical DhcpScopePayload.
 

@@ -74,14 +74,6 @@ class DhcpFailover(BaseModel):
     reservePercent: int = Field(default=0, ge=0, le=100)
     loadBalancePercent: Optional[int] = Field(default=None, ge=0, le=100)
     maxClientLeadTimeMinutes: int = Field(ge=1, le=1440)
-    sharedSecret: Optional[str] = Field(default=None, max_length=256, exclude=True)
-
-    @field_validator("sharedSecret", mode="before")
-    @classmethod
-    def normalize_shared_secret(cls, v: object) -> object:
-        if v == "":
-            return None
-        return v
 
     @model_validator(mode="after")
     def enforce_mode_fields(self) -> "DhcpFailover":

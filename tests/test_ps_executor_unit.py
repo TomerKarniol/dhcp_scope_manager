@@ -163,54 +163,16 @@ class TestByteDecoding:
         assert isinstance(exc_info.value.stderr, str)
 
 
-# ─── redact_powershell_command ────────────────────────────────────────────────
+# ─── command preview sanitization ─────────────────────────────────────────────
 
 class TestRedactPowershellCommand:
 
-    def test_redacts_shared_secret_value(self):
-        cmd = 'Add-DhcpServerv4Failover -SharedSecret "mysecret" -Force'
-        redacted = redact_powershell_command(cmd)
-        assert "mysecret" not in redacted
-        assert "***REDACTED***" in redacted
-        assert "-SharedSecret" in redacted
-
-    def test_redacts_empty_shared_secret(self):
-        """Even an empty -SharedSecret "" should be redacted."""
-        cmd = 'Add-DhcpServerv4Failover -SharedSecret "" -Force'
-        redacted = redact_powershell_command(cmd)
-        assert "***REDACTED***" in redacted or '""' not in redacted
-
-    def test_case_insensitive_flag_name(self):
-        cmd = 'Set-DhcpServerv4Failover -sharedsecret "CaSeSensItIvE"'
-        redacted = redact_powershell_command(cmd)
-        assert "CaSeSensItIvE" not in redacted
-
-    def test_redacts_single_quoted_shared_secret(self):
-        cmd = "Set-DhcpServerv4Failover -SharedSecret 'sec''ret' -Force"
-        redacted = redact_powershell_command(cmd)
-        assert "sec''ret" not in redacted
-        assert "***REDACTED***" in redacted
-
-    def test_leaves_non_secret_params_unchanged(self):
+    def test_leaves_command_text_unchanged(self):
         cmd = 'Add-DhcpServerv4Scope -Name "myscope" -SubnetMask 255.255.255.0'
         assert redact_powershell_command(cmd) == cmd
 
-    def test_does_not_remove_surrounding_params(self):
-        cmd = 'Add-DhcpServerv4Failover -Name "rel1" -SharedSecret "s3cr3t" -Force'
-        redacted = redact_powershell_command(cmd)
-        assert '"rel1"' in redacted
-        assert "-Force" in redacted
-        assert "s3cr3t" not in redacted
-
     def test_empty_command_unchanged(self):
         assert redact_powershell_command("") == ""
-
-    def test_multiple_occurrences_all_redacted(self):
-        cmd = '-SharedSecret "a" -SharedSecret "b"'
-        redacted = redact_powershell_command(cmd)
-        assert '"a"' not in redacted
-        assert '"b"' not in redacted
-        assert redacted.count("***REDACTED***") == 2
 
 
 # ─── is_not_found_error ───────────────────────────────────────────────────────

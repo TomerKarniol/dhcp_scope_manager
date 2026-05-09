@@ -8,6 +8,7 @@ from app.dependencies.dhcp import require_dhcp_service
 from app.dependencies.scopes import validate_scope_id, validate_scope_request
 from app.models import DhcpScopePayload
 from app.services import scope_service
+from app.utils.decorators import log_call
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,14 @@ router = APIRouter(
 
 
 @router.get("/scopes", response_model=list[DhcpScopePayload], status_code=status.HTTP_200_OK)
+@log_call
 async def list_scopes() -> list[DhcpScopePayload]:
     logger.info("Listing DHCP scopes", extra={"operation": "list_scopes"})
     return await scope_service.list_scopes()
 
 
 @router.post("/scopes/{scope_id}", response_model=DhcpScopePayload, status_code=status.HTTP_200_OK)
+@log_call
 async def create_scope_by_id(
     scope_and_payload: Annotated[tuple[str, DhcpScopePayload], Depends(validate_scope_request)],
 ) -> DhcpScopePayload:
@@ -35,6 +38,7 @@ async def create_scope_by_id(
 
 
 @router.get("/scopes/{scope_id}", response_model=DhcpScopePayload, status_code=status.HTTP_200_OK)
+@log_call
 async def get_scope(
     scope_id: str = Depends(validate_scope_id),
 ) -> DhcpScopePayload:
@@ -43,6 +47,7 @@ async def get_scope(
 
 
 @router.put("/scopes/{scope_id}", response_model=DhcpScopePayload, status_code=status.HTTP_200_OK)
+@log_call
 async def update_scope(
     scope_and_payload: Annotated[tuple[str, DhcpScopePayload], Depends(validate_scope_request)],
     scope_id: str = Depends(validate_scope_id),
@@ -53,6 +58,7 @@ async def update_scope(
 
 
 @router.delete("/scopes/{scope_id}", status_code=status.HTTP_204_NO_CONTENT)
+@log_call
 async def delete_scope(
     scope_id: str = Depends(validate_scope_id),
 ) -> Response:

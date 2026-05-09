@@ -132,6 +132,7 @@ async def list_scopes() -> list[DhcpScopePayload]:
     return [await assemble_scope_state(scope_id) for scope_id in scope_ids]
 
 
+@log_call
 async def scope_exists(scope_id: str) -> bool:
     scope_literal = ps_ipv4(scope_id)
     return await _run_ps(
@@ -337,6 +338,7 @@ async def delete_scope(scope_id: str) -> None:
 # Failover helpers
 # ---------------------------------------------------------------------------
 
+@log_call
 async def _replicate_failover(scope_id: str, relationship_name: str | None = None) -> None:
     await run_ps(
         f"Invoke-DhcpServerv4FailoverReplication -ScopeId {ps_ipv4(scope_id)} -Force",
@@ -356,6 +358,7 @@ async def _replicate_failover(scope_id: str, relationship_name: str | None = Non
     )
 
 
+@log_call
 async def _remove_scope_from_failover(scope_id: str, rel_name: str) -> None:
     await run_ps(
         f"Remove-DhcpServerv4FailoverScope -Name {ps_single_quote(rel_name)} "
@@ -385,6 +388,7 @@ async def _remove_scope_from_failover(scope_id: str, rel_name: str) -> None:
             )
 
 
+@log_call
 async def _setup_failover(scope_id: str, failover: DhcpFailover) -> None:
     existing = await _run_ps(
         f"Get-DhcpServerv4Failover -Name {ps_single_quote(failover.relationshipName)}",
@@ -407,6 +411,7 @@ async def _setup_failover(scope_id: str, failover: DhcpFailover) -> None:
         await _create_failover_relationship(scope_id, failover)
 
 
+@log_call
 async def _create_failover_relationship(scope_id: str, failover: DhcpFailover) -> None:
     cmd = (
         f'Add-DhcpServerv4Failover '
@@ -423,9 +428,6 @@ async def _create_failover_relationship(scope_id: str, failover: DhcpFailover) -
     else:
         cmd += f" -LoadBalancePercent {failover.loadBalancePercent}"
 
-    if failover.sharedSecret:
-        cmd += f' -SharedSecret {ps_single_quote(failover.sharedSecret)}'
-
     await run_ps(
         cmd,
         parse_json=False,
@@ -435,6 +437,7 @@ async def _create_failover_relationship(scope_id: str, failover: DhcpFailover) -
     )
 
 
+@log_call
 async def _handle_failover_diff(
     scope_id: str,
     current: Optional[DhcpFailover],
@@ -486,13 +489,11 @@ async def _handle_failover_diff(
         mutable_changed = (
             current.reservePercent != desired.reservePercent
             or current.maxClientLeadTimeMinutes != desired.maxClientLeadTimeMinutes
-            or desired.sharedSecret is not None
         )
     else:
         mutable_changed = (
             current.loadBalancePercent != desired.loadBalancePercent
             or current.maxClientLeadTimeMinutes != desired.maxClientLeadTimeMinutes
-            or desired.sharedSecret is not None
         )
 
     if mutable_changed:
@@ -512,8 +513,6 @@ async def _handle_failover_diff(
             cmd += f" -ReservePercent {desired.reservePercent}"
         else:
             cmd += f" -LoadBalancePercent {desired.loadBalancePercent}"
-        if desired.sharedSecret is not None:
-            cmd += f" -SharedSecret {ps_single_quote(desired.sharedSecret)}"
         await run_ps(
             cmd,
             parse_json=False,

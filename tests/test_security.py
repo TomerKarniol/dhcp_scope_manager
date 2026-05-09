@@ -245,60 +245,20 @@ class TestApiResponseSanitization:
         assert r.status_code == 500
         assert "secret-server.internal.corp" not in r.text
 
-    async def test_shared_secret_not_in_shared_secret_change_log(self, caplog):
-        """Updating sharedSecret must not log the secret value."""
-        from app.models import DhcpFailover, DhcpScopePayload
-        from app.services import scope_service
-
-        base = dict(
-            scopeName="Test", network="10.20.30.0", subnetMask="255.255.255.0",
-            startRange="10.20.30.100", endRange="10.20.30.200",
-            leaseDurationDays=8, description="", gateway="10.20.30.1",
-            dnsServers=["10.0.0.53"], dnsDomain="", exclusions=[],
-        )
-        current = DhcpScopePayload(
-            **base,
-            failover=DhcpFailover(
-                partnerServer="dhcp02.lab.local", relationshipName="rel1",
-                mode="HotStandby", serverRole="Active",
-                maxClientLeadTimeMinutes=60, sharedSecret=None,
-            ),
-        )
-        desired = DhcpScopePayload(
-            **base,
-            failover=DhcpFailover(
-                partnerServer="dhcp02.lab.local", relationshipName="rel1",
-                mode="HotStandby", serverRole="Active",
-                maxClientLeadTimeMinutes=60, sharedSecret="TOP-SECRET-VALUE",
-            ),
-        )
-
-        with patch("app.services.scope_service.assemble_scope_state") as mock_asm, \
-             patch("app.services.scope_service.run_ps") as mock_ps, \
-             caplog.at_level(logging.DEBUG):
-            mock_asm.side_effect = [current, desired]
-            mock_ps.return_value = None
-            await scope_service.update_scope("10.20.30.0", desired)
-
-        assert "TOP-SECRET-VALUE" not in caplog.text
-
-
 # ─── PowerShellError safe string / JSON logging ──────────────────────────────
 
 class TestPowerShellErrorSafety:
 
-    def test_powershell_error_str_redacts_secret_and_windows_path(self):
+    def test_powershell_error_str_redacts_windows_path(self):
         err = PowerShellError(
-            "Set-DhcpServerv4Failover -SharedSecret 'TOP-SECRET'",
-            "Failure in C:\\Windows\\System32\\dhcp.dll -SharedSecret 'TOP-SECRET'",
+            "Set-DhcpServerv4Failover",
+            "Failure in C:\\Windows\\System32\\dhcp.dll",
             1,
             operation="set_failover_params",
             scope_id="10.20.30.0",
         )
         text = str(err)
-        assert "TOP-SECRET" not in text
         assert "C:\\" not in text
-        assert "***REDACTED***" in text
         assert "<path>" in text
 
     def test_json_formatter_includes_safe_extra_fields(self):
