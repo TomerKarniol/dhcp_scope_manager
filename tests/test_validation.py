@@ -539,7 +539,7 @@ def test_description_none_normalizes_to_empty_string():
     """description=None must normalize to '' — prevents Crossplane drift."""
     scope = DhcpScopePayload(
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
-        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        startRange="10.0.0.2", endRange="10.0.0.10", leaseDurationDays=8,
         description=None,  # explicit null
         gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain="", exclusions=[],
     )
@@ -550,7 +550,7 @@ def test_description_empty_string_accepted():
     """description='' must be accepted and preserved."""
     scope = DhcpScopePayload(
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
-        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        startRange="10.0.0.2", endRange="10.0.0.10", leaseDurationDays=8,
         description="",
         gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain="", exclusions=[],
     )
@@ -656,7 +656,90 @@ def test_dns_domain_none_normalizes_to_empty_string():
     """dnsDomain=None must normalize to '' — consistent with description field."""
     scope = DhcpScopePayload(
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
-        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        startRange="10.0.0.2", endRange="10.0.0.10", leaseDurationDays=8,
         description="", gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain=None, exclusions=[],
     )
     assert scope.dnsDomain == ""
+
+
+# ---------------------------------------------------------------------------
+# Gateway-in-distribution-range validation
+# ---------------------------------------------------------------------------
+
+def test_gateway_outside_range_accepted():
+    """Gateway below startRange is outside the pool — valid."""
+    scope = DhcpScopePayload(**_minimal_scope(
+        gateway="10.20.30.1",
+        startRange="10.20.30.100",
+        endRange="10.20.30.200",
+        exclusions=[],
+    ))
+    assert str(scope.gateway) == "10.20.30.1"
+
+
+def test_gateway_none_accepted():
+    """gateway=None means no router option — always valid."""
+    scope = DhcpScopePayload(**_minimal_scope(gateway=None))
+    assert scope.gateway is None
+
+
+def test_gateway_in_range_without_exclusion_rejected():
+    """Gateway inside [startRange, endRange] with no exclusion causes DHCP network outage."""
+    with pytest.raises(ValidationError) as exc_info:
+        DhcpScopePayload(**_minimal_scope(
+            gateway="10.20.30.150",   # inside 100–200
+            startRange="10.20.30.100",
+            endRange="10.20.30.200",
+            exclusions=[],
+        ))
+    assert "distribution range" in str(exc_info.value).lower()
+
+
+def test_gateway_in_range_with_exclusion_accepted():
+    """Gateway inside range is valid when it is covered by an exclusion."""
+    scope = DhcpScopePayload(**_minimal_scope(
+        gateway="10.20.30.101",
+        startRange="10.20.30.100",
+        endRange="10.20.30.200",
+        exclusions=[
+            {"startAddress": "10.20.30.100", "endAddress": "10.20.30.110"},
+        ],
+    ))
+    assert str(scope.gateway) == "10.20.30.101"
+
+
+def test_gateway_at_start_of_range_without_exclusion_rejected():
+    """Gateway equal to startRange with no exclusion is rejected."""
+    with pytest.raises(ValidationError) as exc_info:
+        DhcpScopePayload(**_minimal_scope(
+            gateway="10.20.30.100",
+            startRange="10.20.30.100",
+            endRange="10.20.30.200",
+            exclusions=[],
+        ))
+    assert "distribution range" in str(exc_info.value).lower()
+
+
+def test_gateway_at_end_of_range_without_exclusion_rejected():
+    """Gateway equal to endRange with no exclusion is rejected."""
+    with pytest.raises(ValidationError) as exc_info:
+        DhcpScopePayload(**_minimal_scope(
+            gateway="10.20.30.200",
+            startRange="10.20.30.100",
+            endRange="10.20.30.200",
+            exclusions=[],
+        ))
+    assert "distribution range" in str(exc_info.value).lower()
+
+
+def test_gateway_in_range_excluded_by_adjacent_range():
+    """Exclusion range covering gateway makes the configuration safe."""
+    scope = DhcpScopePayload(**_minimal_scope(
+        gateway="10.20.30.105",
+        startRange="10.20.30.100",
+        endRange="10.20.30.200",
+        exclusions=[
+            {"startAddress": "10.20.30.100", "endAddress": "10.20.30.110"},
+        ],
+    ))
+    assert str(scope.gateway) == "10.20.30.105"

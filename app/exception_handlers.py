@@ -14,6 +14,7 @@ from app.services.dhcp_service import DhcpEnvironmentError, DhcpEnvReason
 from app.services.ps_executor import (
     PowerShellError,
     PowerShellTimeoutError,
+    is_already_exists_error,
     sanitize_powershell_text,
 )
 
@@ -97,10 +98,6 @@ def _dhcp_env_message(reason: str) -> str:
         DhcpEnvReason.DHCP_CMDLETS_UNAVAILABLE: "DHCP PowerShell cmdlets are unavailable",
     }.get(reason, "DHCP automation runtime is unavailable")
 
-
-def _is_already_exists_error(stderr: str) -> bool:
-    lower = stderr.lower()
-    return any(kw in lower for kw in ("already exists", "already been added", "already in use"))
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -202,7 +199,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 message="Timed out while waiting for DHCP PowerShell command to finish",
             )
 
-        if _is_already_exists_error(exc.stderr):
+        if is_already_exists_error(exc.stderr):
             return _error_response(
                 status_code=status.HTTP_409_CONFLICT,
                 code=ErrorCode.DHCP_CONFLICT,

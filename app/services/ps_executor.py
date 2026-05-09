@@ -119,6 +119,12 @@ def is_not_found_error(stderr: str) -> bool:
     return any(kw in lower for kw in ("not found", "does not exist", "no dhcp scope", "cannot find"))
 
 
+def is_already_exists_error(stderr: str) -> bool:
+    """Return True if PowerShell stderr indicates the object already exists."""
+    lower = stderr.lower()
+    return any(kw in lower for kw in ("already exists", "already been added", "already in use"))
+
+
 async def run_ps(
     command: str,
     parse_json: bool = True,
@@ -213,7 +219,7 @@ async def run_ps(
             scope_id=scope_id,
         )
 
-    logger.debug(
+    logger.info(
         "DHCP PowerShell command completed",
         extra={**log_extra, "duration_ms": duration_ms, "status": "ok"},
     )

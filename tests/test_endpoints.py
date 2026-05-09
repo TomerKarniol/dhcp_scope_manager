@@ -610,13 +610,17 @@ async def test_list_scopes_sorted_numerically():
     )
     # "10.20.9.0" < "10.20.30.0" numerically but "10.20.30.0" < "10.20.9.0" lexicographically.
     # Correct numeric sort must put 10.20.9.0 first.
-    raw_list = [{"ScopeId": "10.20.30.0"}, {"ScopeId": "10.20.9.0"}]
+    # The all-scopes script emits one {scope, options, exclusions, failover} object per scope.
+    raw_entries = [
+        {"scope": {"ScopeId": "10.20.30.0"}, "options": [], "exclusions": [], "failover": None},
+        {"scope": {"ScopeId": "10.20.9.0"},  "options": [], "exclusions": [], "failover": None},
+    ]
 
-    def fake_assemble(scope_id):
+    def fake_build(scope_id, state):
         return scope_30 if scope_id == "10.20.30.0" else scope_9
 
-    with patch("app.services.scope_service.run_ps", return_value=raw_list), \
-         patch("app.services.scope_service.assemble_scope_state", side_effect=fake_assemble):
+    with patch("app.services.scope_service.run_ps", return_value=raw_entries), \
+         patch("app.services.scope_service.build_payload_from_scope_state", side_effect=fake_build):
         result = await svc_list_scopes()
 
     assert len(result) == 2

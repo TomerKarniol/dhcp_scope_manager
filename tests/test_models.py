@@ -18,7 +18,7 @@ def test_scope_payload_field_ordering(sample_scope_payload):
 def test_empty_exclusions_not_null():
     payload = DhcpScopePayload(
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
-        startRange="10.0.0.1", endRange="10.0.0.254", leaseDurationDays=8,
+        startRange="10.0.0.2", endRange="10.0.0.254", leaseDurationDays=8,
         description="", gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain="",
         exclusions=[], failover=None,
     )
@@ -49,7 +49,7 @@ def test_dns_servers_empty_rejected():
     with pytest.raises(ValidationError):
         DhcpScopePayload(
             scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
-            startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+            startRange="10.0.0.2", endRange="10.0.0.10", leaseDurationDays=8,
             description="", gateway="10.0.0.1", dnsServers=[], dnsDomain="",
             exclusions=[], failover=None,
         )
@@ -58,7 +58,7 @@ def test_dns_servers_empty_rejected():
 def test_dns_servers_single_server_accepted():
     payload = DhcpScopePayload(
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
-        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        startRange="10.0.0.2", endRange="10.0.0.10", leaseDurationDays=8,
         description="", gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain="",
         exclusions=[], failover=None,
     )
@@ -68,7 +68,7 @@ def test_dns_servers_single_server_accepted():
 def test_dns_servers_multiple_servers_accepted():
     payload = DhcpScopePayload(
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
-        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        startRange="10.0.0.2", endRange="10.0.0.10", leaseDurationDays=8,
         description="", gateway="10.0.0.1",
         dnsServers=["10.0.0.53", "10.0.0.54"], dnsDomain="",
         exclusions=[], failover=None,

@@ -161,6 +161,142 @@ class TestLogCallDecorator:
 
         assert await concat("hello", "world", sep="-") == "hello-world"
 
+    # ── structured extra fields ───────────────────────────────────────────────
+
+    def test_sync_emits_operation_field(self, caplog):
+        import logging
+
+        @log_call
+        def my_op():
+            pass
+
+        with caplog.at_level(logging.INFO):
+            my_op()
+
+        records = [r for r in caplog.records if "my_op" in r.getMessage()]
+        assert records, "expected at least one log record mentioning my_op"
+        for rec in records:
+            assert getattr(rec, "operation", None) == "my_op"
+
+    @pytest.mark.asyncio
+    async def test_async_emits_operation_field(self, caplog):
+        import logging
+
+        @log_call
+        async def async_my_op():
+            pass
+
+        with caplog.at_level(logging.INFO):
+            await async_my_op()
+
+        records = [r for r in caplog.records if "async_my_op" in r.getMessage()]
+        assert records
+        for rec in records:
+            assert getattr(rec, "operation", None) == "async_my_op"
+
+    def test_exit_record_has_duration_ms_and_status_ok(self, caplog):
+        import logging
+
+        @log_call
+        def quick():
+            return 1
+
+        with caplog.at_level(logging.INFO):
+            quick()
+
+        exit_rec = next(
+            (r for r in caplog.records if "←" in r.getMessage() and "quick" in r.getMessage()),
+            None,
+        )
+        assert exit_rec is not None, "no exit log record found"
+        assert getattr(exit_rec, "status", None) == "ok"
+        assert isinstance(getattr(exit_rec, "duration_ms", None), float)
+
+    @pytest.mark.asyncio
+    async def test_async_exit_record_has_duration_ms_and_status_ok(self, caplog):
+        import logging
+
+        @log_call
+        async def aquick():
+            return 1
+
+        with caplog.at_level(logging.INFO):
+            await aquick()
+
+        exit_rec = next(
+            (r for r in caplog.records if "←" in r.getMessage() and "aquick" in r.getMessage()),
+            None,
+        )
+        assert exit_rec is not None
+        assert getattr(exit_rec, "status", None) == "ok"
+        assert isinstance(getattr(exit_rec, "duration_ms", None), float)
+
+    def test_error_exit_has_status_error(self, caplog):
+        import logging
+
+        @log_call
+        def boom():
+            raise RuntimeError("x")
+
+        with caplog.at_level(logging.INFO):
+            try:
+                boom()
+            except RuntimeError:
+                pass
+
+        exit_rec = next(
+            (r for r in caplog.records if "raised" in r.getMessage()),
+            None,
+        )
+        assert exit_rec is not None
+        assert getattr(exit_rec, "status", None) == "error"
+
+    def test_scope_id_extracted_from_positional_arg(self, caplog):
+        import logging
+
+        @log_call
+        def with_scope(scope_id: str, other: int = 0) -> str:
+            return scope_id
+
+        with caplog.at_level(logging.INFO):
+            with_scope("10.20.30.0", other=5)
+
+        records = [r for r in caplog.records if "with_scope" in r.getMessage()]
+        assert records
+        for rec in records:
+            assert getattr(rec, "scope_id", None) == "10.20.30.0"
+
+    @pytest.mark.asyncio
+    async def test_async_scope_id_extracted_from_kwarg(self, caplog):
+        import logging
+
+        @log_call
+        async def async_with_scope(scope_id: str) -> str:
+            return scope_id
+
+        with caplog.at_level(logging.INFO):
+            await async_with_scope(scope_id="10.20.30.1")
+
+        records = [r for r in caplog.records if "async_with_scope" in r.getMessage()]
+        assert records
+        for rec in records:
+            assert getattr(rec, "scope_id", None) == "10.20.30.1"
+
+    def test_no_scope_id_param_omits_field(self, caplog):
+        import logging
+
+        @log_call
+        def no_scope(x: int) -> int:
+            return x
+
+        with caplog.at_level(logging.INFO):
+            no_scope(42)
+
+        records = [r for r in caplog.records if "no_scope" in r.getMessage()]
+        assert records
+        for rec in records:
+            assert not hasattr(rec, "scope_id") or getattr(rec, "scope_id", None) is None
+
 
 # ─── ScopeLockManager ─────────────────────────────────────────────────────────
 

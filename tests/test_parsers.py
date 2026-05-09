@@ -3,6 +3,7 @@ import pytest
 from app.errors import DhcpConflictError, InvalidScopeIdError
 from app.services.ps_executor import PowerShellError
 from app.services.ps_parsers import (
+    build_get_all_scopes_script,
     build_get_scope_state_script,
     build_payload_from_scope_state,
     normalize_list,
@@ -336,3 +337,36 @@ def test_get_scope_state_script_rethrows_unexpected_optional_errors():
     assert "Test-DhcpNoExclusions" in script
     assert "Test-DhcpNoFailover" in script
     assert script.count("throw") == 2
+
+
+# ─── build_get_all_scopes_script ──────────────────────────────────────────────
+
+def test_all_scopes_script_contains_required_cmdlets():
+    script = build_get_all_scopes_script()
+    assert "Get-DhcpServerv4Scope" in script
+    assert "Get-DhcpServerv4OptionValue" in script
+    assert "Get-DhcpServerv4ExclusionRange" in script
+    assert "Get-DhcpServerv4Failover" in script
+    assert "ConvertTo-Json -Depth 10 -Compress" in script
+
+
+def test_all_scopes_script_has_no_scope_id_literal():
+    """The all-scopes script must not hard-code a scope ID — it iterates all scopes."""
+    script = build_get_all_scopes_script()
+    assert "10.20.30.0" not in script
+    assert "$ScopeId =" not in script
+
+
+def test_all_scopes_script_handles_missing_optional_objects():
+    """The all-scopes script must use Test-DhcpNoExclusions/Failover helpers for optional data."""
+    script = build_get_all_scopes_script()
+    assert "Test-DhcpNoExclusions" in script
+    assert "Test-DhcpNoFailover" in script
+    assert script.count("throw") == 2
+
+
+def test_all_scopes_script_uses_list_accumulator():
+    """The all-scopes script must use a List accumulator and foreach loop."""
+    script = build_get_all_scopes_script()
+    assert "foreach" in script
+    assert "$result" in script

@@ -32,6 +32,73 @@ def _validated_scope_id(scope_id: str) -> str:
         raise InvalidScopeIdError(scope_text)
 
 
+def build_get_all_scopes_script() -> str:
+    """Build a single PowerShell script that emits ALL scope states as a JSON array.
+
+    Runs one PowerShell process for the entire fleet instead of one per scope.
+    The output structure is identical to build_get_scope_state_script — an array
+    where each element is {scope, options, exclusions, failover}.
+
+    PowerShell collapses a single-element array to a plain object in ConvertTo-Json.
+    normalize_list() on the parsed result handles both cases transparently.
+    """
+    return r"""
+function Test-DhcpNoExclusions($ErrorRecord) {
+    $message = [string]$ErrorRecord.Exception.Message
+    return (
+        $message -match '(?i)exclusion' -and
+        $message -match '(?i)(not found|cannot find|does not exist|no .*exclusion)'
+    )
+}
+
+function Test-DhcpNoFailover($ErrorRecord) {
+    $message = [string]$ErrorRecord.Exception.Message
+    return (
+        $message -match '(?i)(failover|relationship)' -and
+        $message -match '(?i)(not found|cannot find|does not exist|not configured|not associated|no .*failover)'
+    )
+}
+
+$allScopes = @(Get-DhcpServerv4Scope -ErrorAction Stop)
+$result = New-Object System.Collections.Generic.List[Object]
+
+foreach ($s in $allScopes) {
+    $sid = $s.ScopeId
+
+    $options = @(Get-DhcpServerv4OptionValue -ScopeId $sid -ErrorAction Stop)
+
+    try {
+        $exclusions = @(Get-DhcpServerv4ExclusionRange -ScopeId $sid -ErrorAction Stop)
+    } catch {
+        if (Test-DhcpNoExclusions $_) {
+            $exclusions = @()
+        } else {
+            throw
+        }
+    }
+
+    try {
+        $failover = Get-DhcpServerv4Failover -ScopeId $sid -ErrorAction Stop
+    } catch {
+        if (Test-DhcpNoFailover $_) {
+            $failover = $null
+        } else {
+            throw
+        }
+    }
+
+    $result.Add([PSCustomObject]@{
+        scope     = $s
+        options   = $options
+        exclusions = $exclusions
+        failover  = $failover
+    })
+}
+
+$result | ConvertTo-Json -Depth 10 -Compress
+""".strip()
+
+
 def build_get_scope_state_script(scope_id: str) -> str:
     """Build a single PowerShell script that emits all scope state as JSON."""
     scope_literal = ps_single_quote(_validated_scope_id(scope_id))

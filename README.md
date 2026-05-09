@@ -152,7 +152,15 @@ async FastAPI route
 
 PowerShell execution is globally bounded by `POWERSHELL_MAX_CONCURRENCY`. Mutating operations (`POST`, `PUT`, `DELETE`) also take an async per-scope lock, so two writes for `10.20.30.0` are serialized while writes for different scopes can run concurrently up to the global limit.
 
-### GET Read Path
+### GET /api/v1/scopes — List Read Path
+
+`GET /api/v1/scopes` fetches all scopes using **one PowerShell process** for the entire fleet.
+
+The backend builds a single script that loops through all scopes and for each one runs the required DHCP cmdlets in-process, then emits one JSON array containing all scope states. This is O(1) PowerShell processes regardless of fleet size — 150 scopes cost the same as 1 scope in terms of process overhead.
+
+If any cmdlet fails, the entire list fails. A partial result is not returned.
+
+### GET /api/v1/scopes/{scope_id} — Single Scope Read Path
 
 `GET /api/v1/scopes/{scope_id}` assembles the canonical `DhcpScopePayload` with one PowerShell process.
 
@@ -244,11 +252,11 @@ Validation errors include compact field entries:
 
 ### `GET /api/v1/scopes`
 
-Returns all scopes sorted by network address (ascending).
+Returns all scopes sorted by network address (ascending). Uses one PowerShell process for the entire fleet — see [GET List Read Path](#get-apiv1scopes--list-read-path) above.
 
 | Status | Body                                                    | When                            |
 | ------ | ------------------------------------------------------- | ------------------------------- |
-| `200`  | `[DhcpScopePayload, ...]`                               | Success                         |
+| `200`  | `[DhcpScopePayload, ...]`                               | Success (empty list if no scopes exist) |
 | `401`  | Standard error body with `UNAUTHORIZED`                 | Bad or missing bearer token     |
 | `500`  | Standard error body with `POWERSHELL_COMMAND_FAILED`    | PowerShell cmdlet failed        |
 | `503`  | Standard error body with `DHCP_ENVIRONMENT_UNAVAILABLE` | Host cannot run DHCP automation |
@@ -384,6 +392,7 @@ Environment validation is async-safe and cached per process. A successful check 
 - Exclusions are always returned sorted by IP (ascending). Values files must match this order.
 - `dnsServers` must contain at least one IPv4 address. If GET observes a managed scope without DNS servers, the backend treats that as invalid managed state instead of returning a pretend-valid payload.
 - `gateway` is optional. In values files, use `gateway: ""` when you do not want DHCP option 3; the API also accepts `null`/omitted and GET returns `null` when absent.
+- **Gateway-in-range guard**: if `gateway` is set to an IP inside `[startRange, endRange]` and is not covered by an exclusion, the request is rejected with `422 VALIDATION_ERROR`. An unexcluded gateway inside the distribution pool would be leased to a client, causing a network outage.
 - DNS server order is preserved exactly (primary/secondary semantics — never sorted).
 - `description` defaults to `""` (never `null`).
 
@@ -446,6 +455,7 @@ Rules that must hold to prevent infinite reconciliation loops:
 - No hidden defaults or transformations inside the API.
 - Exclusions in values files **must** be in ascending IP numerical order — the API always returns them sorted.
 - DNS server order must match exactly — the API preserves insertion order, never sorts.
+- **Gateway must not be inside the distribution range without an exclusion** — the backend rejects this at validation time (`422`) so it never reaches the DHCP server.
 
 **Removing failover with layered values files:** use `failover: null` — not `failover: {}`.
 Helm deep-merges `{}` with the parent map, leaving failover intact. Only `null` removes it.
@@ -498,8 +508,7 @@ validate-dhcp-values:
 - Runtime environment guard rejects all scope operations on non-Windows / non-DHCP hosts
 - `-ErrorAction Stop` on every PowerShell command
 - PowerShell stderr is sanitized before returning to clients and before logging previews
-- Structured JSON logs include safe fields such as `scope_id`, `operation`, `relationship_name`,
-  `duration_ms`, `status`, and `error_code`
+- Structured JSON logs include safe fields on every entry: `scope_id` (auto-extracted from the call when the function accepts it), `operation` (function name), `duration_ms`, `status` (`ok`/`error`), `relationship_name`, `returncode`, `stderr_preview`, and `error_code`
 
 ## Debugging Errors
 

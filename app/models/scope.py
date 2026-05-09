@@ -209,3 +209,26 @@ class DhcpScopePayload(BaseModel):
                 )
 
         return self
+
+    @model_validator(mode="after")
+    def gateway_not_in_distribution_range(self) -> "DhcpScopePayload":
+        """Validate that gateway is not inside the DHCP distribution pool unless excluded.
+
+        If gateway falls within [startRange, endRange] and is not covered by any
+        exclusion, the DHCP server could lease the gateway IP to a client, causing
+        a network outage for all hosts on that subnet.
+        """
+        if self.gateway is None:
+            return self
+        gw_int = int(self.gateway)
+        if not (int(self.startRange) <= gw_int <= int(self.endRange)):
+            return self
+        # Gateway is inside the distribution range — verify it is excluded.
+        for excl in self.exclusions:
+            if int(excl.startAddress) <= gw_int <= int(excl.endAddress):
+                return self  # covered by an exclusion — safe
+        raise ValueError(
+            f"gateway {self.gateway} is inside the DHCP distribution range "
+            f"{self.startRange}-{self.endRange} but is not covered by any exclusion. "
+            f"Add an exclusion for {self.gateway} or move the gateway outside the range."
+        )

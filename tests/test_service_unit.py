@@ -477,43 +477,65 @@ class TestDeleteScope:
 # ─── list_scopes ──────────────────────────────────────────────────────────────
 
 class TestListScopes:
+    """Tests for list_scopes().
+
+    list_scopes() now uses a single PowerShell process that fetches all scopes
+    at once. The PS script emits one {scope, options, exclusions, failover} object
+    per scope (the same per-scope structure as get_scope_state).  PowerShell
+    collapses a single-element array to a plain object; normalize_list() handles both.
+    """
 
     async def test_empty_server_returns_empty_list(self):
-        with patch("app.services.scope_service.run_ps", return_value=[]):
+        """No scopes → PS returns null → normalize_list → [] → []."""
+        with patch("app.services.scope_service.run_ps", return_value=None):
             from app.services import scope_service
             result = await scope_service.list_scopes()
         assert result == []
 
-    async def test_single_dict_from_ps_is_assembled(self):
-        """PowerShell may return a single dict (not a list) for one scope.
-        normalize_list wraps it; assemble_scope_state must be called for it.
+    async def test_single_scope_dict_assembled(self):
+        """PowerShell collapses a single-scope result to a plain dict (not a list).
+        normalize_list wraps it; the scope is assembled via build_payload_from_scope_state.
         """
         single_scope = _make_scope()
+        raw_entry = {
+            "scope": {"ScopeId": "10.20.30.0"},
+            "options": [],
+            "exclusions": [],
+            "failover": None,
+        }
 
-        with patch("app.services.scope_service.run_ps", return_value={"ScopeId": "10.20.30.0"}), \
-             patch("app.services.scope_service.assemble_scope_state", return_value=single_scope):
+        with patch("app.services.scope_service.run_ps", return_value=raw_entry), \
+             patch("app.services.scope_service.build_payload_from_scope_state",
+                   return_value=single_scope):
             from app.services import scope_service
             result = await scope_service.list_scopes()
 
         assert len(result) == 1
 
     async def test_multiple_scopes_sorted_numerically(self):
-        """list_scopes must sort by IP integer, not lexicographically."""
+        """list_scopes must sort by IP integer, not lexicographically.
+
+        '10.20.9.0' < '10.20.30.0' numerically but lexicographic sort would
+        put '10.20.30.0' first.  The sorted() key uses ip_to_int.
+        """
         scope_9 = _make_scope(
             scopeName="Scope-9", network="10.20.9.0",
             startRange="10.20.9.100", endRange="10.20.9.200", gateway="10.20.9.1",
         )
-        scope_30 = _make_scope(
-            scopeName="Scope-30", network="10.20.30.0",
-        )
+        scope_30 = _make_scope(scopeName="Scope-30", network="10.20.30.0")
 
-        def fake_assemble(sid):
-            return scope_9 if sid == "10.20.9.0" else scope_30
+        # PS returns wrong order; list_scopes must sort the result.
+        raw_entries = [
+            {"scope": {"ScopeId": "10.20.30.0"}, "options": [], "exclusions": [], "failover": None},
+            {"scope": {"ScopeId": "10.20.9.0"},  "options": [], "exclusions": [], "failover": None},
+        ]
 
-        raw = [{"ScopeId": "10.20.30.0"}, {"ScopeId": "10.20.9.0"}]  # wrong order from PS
+        def fake_build(scope_id, state):
+            return scope_9 if scope_id == "10.20.9.0" else scope_30
 
-        with patch("app.services.scope_service.run_ps", return_value=raw), \
-             patch("app.services.scope_service.assemble_scope_state", side_effect=fake_assemble):
+        with patch("app.services.scope_service.run_ps", return_value=raw_entries), \
+             patch("app.services.scope_service.build_payload_from_scope_state",
+                   side_effect=fake_build):
             from app.services import scope_service
             result = await scope_service.list_scopes()
 
@@ -521,16 +543,17 @@ class TestListScopes:
         assert str(result[0].network) == "10.20.9.0"
         assert str(result[1].network) == "10.20.30.0"
 
-    async def test_scopes_without_scope_id_field_skipped(self):
-        """list_scopes must skip PS entries that have no ScopeId (malformed output)."""
-        raw = [
-            {"ScopeId": "10.20.30.0"},
-            {"Name": "orphan"},  # no ScopeId
+    async def test_entry_without_scope_id_skipped(self):
+        """Entries where scope.ScopeId is absent or empty are silently skipped."""
+        good_scope = _make_scope()
+        raw_entries = [
+            {"scope": {"ScopeId": "10.20.30.0"}, "options": [], "exclusions": [], "failover": None},
+            {"scope": {},                          "options": [], "exclusions": [], "failover": None},  # no ScopeId
         ]
-        scope = _make_scope()
 
-        with patch("app.services.scope_service.run_ps", return_value=raw), \
-             patch("app.services.scope_service.assemble_scope_state", return_value=scope):
+        with patch("app.services.scope_service.run_ps", return_value=raw_entries), \
+             patch("app.services.scope_service.build_payload_from_scope_state",
+                   return_value=good_scope):
             from app.services import scope_service
             result = await scope_service.list_scopes()
 

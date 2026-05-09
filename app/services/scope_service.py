@@ -4,8 +4,14 @@ from typing import Optional
 
 from app.errors import ScopeNotFoundError
 from app.models import DhcpFailover, DhcpScopePayload
-from app.services.ps_executor import PowerShellError, is_not_found_error, run_ps
-from app.services.ps_parsers import assemble_scope_state, normalize_list
+from app.services.ps_executor import PowerShellError, is_already_exists_error, is_not_found_error, run_ps
+from app.services.ps_parsers import (
+    assemble_scope_state,
+    build_get_all_scopes_script,
+    build_payload_from_scope_state,
+    normalize_get_scope_state,
+    normalize_list,
+)
 from app.utils.decorators import log_call
 from app.utils.ip_utils import ip_to_int
 from app.utils.locks import scope_locks
@@ -17,10 +23,6 @@ logger = logging.getLogger(__name__)
 def _scope_extra(scope_id: str, operation: str, **extra: object) -> dict[str, object]:
     return {"scope_id": str(scope_id), "operation": operation, **extra}
 
-
-def _is_already_exists_error(stderr: str) -> bool:
-    lower = stderr.lower()
-    return any(kw in lower for kw in ("already exists", "already been added", "already in use"))
 
 
 def _set_options_command(scope_literal: str, payload: DhcpScopePayload) -> str:
@@ -91,7 +93,7 @@ async def _run_ps(
                 extra=_scope_extra(scope_id or "", operation or "powershell", status="ignored"),
             )
             return None
-        if ignore_already_exists and _is_already_exists_error(exc.stderr):
+        if ignore_already_exists and is_already_exists_error(exc.stderr):
             logger.info(
                 "Ignoring DHCP object already exists",
                 extra=_scope_extra(scope_id or "", operation or "powershell", status="ignored"),
@@ -133,14 +135,34 @@ async def _assemble_existing_scope(scope_id: str) -> DhcpScopePayload:
 
 @log_call
 async def list_scopes() -> list[DhcpScopePayload]:
+    """Return all DHCP scopes sorted by network address (ascending).
+
+    Uses a single PowerShell process that fetches scope + options + exclusions +
+    failover for every scope in one pass, instead of one process per scope.
+    This reduces overhead from O(N) processes to O(1) for a fleet of N scopes.
+
+    If the DHCP server has no scopes, PowerShell returns null and an empty list
+    is returned. Any PowerShell error fails the entire list — a single broken
+    scope does not produce a partial result.
+    """
     logger.info("Listing DHCP scopes", extra={"operation": "list_scopes"})
-    raw = await run_ps("Get-DhcpServerv4Scope", operation="list_scopes")
-    entries = normalize_list(raw)
-    scope_ids: list[str] = sorted(
-        (str(e["ScopeId"]) for e in entries if e.get("ScopeId")),
-        key=ip_to_int,
+    script = build_get_all_scopes_script()
+    raw = await run_ps(
+        script,
+        append_error_action=False,
+        append_convert_to_json=False,
+        operation="list_scopes",
     )
-    return [await assemble_scope_state(scope_id) for scope_id in scope_ids]
+    # normalize_list handles: None (no scopes) → [], dict (one scope) → [dict], list → list
+    entries = normalize_list(raw)
+    payloads: list[DhcpScopePayload] = []
+    for entry in entries:
+        state = normalize_get_scope_state(entry)
+        scope_id = str(state["scope"].get("ScopeId", "")).strip()
+        if not scope_id:
+            continue
+        payloads.append(build_payload_from_scope_state(scope_id, state))
+    return sorted(payloads, key=lambda p: ip_to_int(p.network))
 
 
 @log_call
@@ -243,25 +265,30 @@ async def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePay
                 operation="set_scope_params",
             )
 
-        if (
+        options_changed = (
             current.dnsServers != desired.dnsServers
             or current.dnsDomain != desired.dnsDomain
-        ):
+            or current.gateway != desired.gateway
+        )
+        if options_changed:
             changed = True
             logger.info(
                 "Updating DHCP scope options",
                 extra=_scope_extra(scope_id, "set_dns_options"),
             )
+            # Single combined call: sets DNS servers, domain, and gateway (when not None).
+            # Merging DNS and gateway into one cmdlet call avoids a redundant PowerShell
+            # process when both change simultaneously.
             await run_ps(
                 _set_options_command(scope_literal, desired),
                 parse_json=False,
                 scope_id=scope_id,
                 operation="set_dns_options",
             )
-
-        if current.gateway != desired.gateway:
-            changed = True
-            if desired.gateway is None:
+            # If gateway is being removed (transitioned to None), explicitly remove
+            # DHCP option 3. _set_options_command omits -Router when gateway is None,
+            # but Windows DHCP does not clear an existing router option automatically.
+            if current.gateway != desired.gateway and desired.gateway is None:
                 logger.info(
                     "Removing DHCP router option",
                     extra=_scope_extra(scope_id, "remove_router_option"),
@@ -273,18 +300,6 @@ async def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePay
                     ignore_not_found=True,
                     scope_id=scope_id,
                     operation="remove_router_option",
-                )
-            else:
-                logger.info(
-                    "Updating DHCP router option",
-                    extra=_scope_extra(scope_id, "set_router_option"),
-                )
-                await run_ps(
-                    f"Set-DhcpServerv4OptionValue -ScopeId {scope_literal} "
-                    f"-Router {ps_ipv4(desired.gateway)}",
-                    parse_json=False,
-                    scope_id=scope_id,
-                    operation="set_router_option",
                 )
 
         current_excl = {(e.startAddress, e.endAddress) for e in current.exclusions}

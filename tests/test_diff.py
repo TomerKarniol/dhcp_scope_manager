@@ -579,3 +579,63 @@ async def test_normalized_fields_do_not_trigger_spurious_update():
     assert ps_commands == [], (
         "No PowerShell calls expected — identical LoadBalance config with normalized fields"
     )
+
+
+# ---------------------------------------------------------------------------
+# Options-merge: DNS + gateway changes produce a single Set-DhcpServerv4OptionValue
+# ---------------------------------------------------------------------------
+
+async def test_dns_and_gateway_changed_single_options_call():
+    """When both DNS and gateway change, only ONE Set-DhcpServerv4OptionValue is issued.
+
+    Before the options-merge fix there were two calls: one for DNS/domain, one for gateway.
+    The merged path issues a single combined call that sets DNS, domain, and -Router together,
+    avoiding a redundant PowerShell process per reconciliation cycle.
+    """
+    current = _make_scope(dnsServers=["10.0.0.53"], gateway="10.20.30.1")
+    desired = _make_scope(dnsServers=["10.0.0.53", "10.0.0.54"], gateway="10.20.30.2")
+    calls = await _run_update(current, desired)
+    ps_commands = [c.args[0] for c in calls]
+    set_options_calls = [cmd for cmd in ps_commands if "Set-DhcpServerv4OptionValue" in cmd]
+    assert len(set_options_calls) == 1, (
+        f"Expected exactly 1 Set-DhcpServerv4OptionValue call, got {len(set_options_calls)}: "
+        f"{set_options_calls}"
+    )
+    # The single call must carry both DNS and router
+    cmd = set_options_calls[0]
+    assert "-DnsServer" in cmd
+    assert "-Router '10.20.30.2'" in cmd
+
+
+async def test_dns_changed_gateway_removed_issues_remove_option():
+    """When DNS changes and gateway is removed, Set-DhcpServerv4OptionValue runs once
+    and Remove-DhcpServerv4OptionValue -OptionId 3 runs once — no duplicate Set calls.
+    """
+    current = _make_scope(dnsServers=["10.0.0.53"], gateway="10.20.30.1")
+    desired = _make_scope(dnsServers=["10.0.0.53", "10.0.0.54"], gateway=None)
+    calls = await _run_update(current, desired)
+    ps_commands = [c.args[0] for c in calls]
+    set_options_calls = [cmd for cmd in ps_commands if "Set-DhcpServerv4OptionValue" in cmd]
+    remove_option_calls = [
+        cmd for cmd in ps_commands
+        if "Remove-DhcpServerv4OptionValue" in cmd and "-OptionId 3" in cmd
+    ]
+    assert len(set_options_calls) == 1, (
+        f"Expected 1 Set-DhcpServerv4OptionValue, got {len(set_options_calls)}"
+    )
+    assert len(remove_option_calls) == 1, (
+        f"Expected 1 Remove-DhcpServerv4OptionValue -OptionId 3, got {len(remove_option_calls)}"
+    )
+    # Set call must NOT include -Router when gateway is None
+    assert "-Router" not in set_options_calls[0]
+
+
+async def test_only_gateway_changed_no_dns_single_options_call():
+    """When only gateway changes (DNS unchanged), still only one Set-DhcpServerv4OptionValue."""
+    current = _make_scope(gateway="10.20.30.1")
+    desired = _make_scope(gateway="10.20.30.2")
+    calls = await _run_update(current, desired)
+    ps_commands = [c.args[0] for c in calls]
+    set_options_calls = [cmd for cmd in ps_commands if "Set-DhcpServerv4OptionValue" in cmd]
+    assert len(set_options_calls) == 1
+    assert "-Router '10.20.30.2'" in set_options_calls[0]

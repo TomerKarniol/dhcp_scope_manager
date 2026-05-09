@@ -66,7 +66,6 @@ dhcp_values:
 | `startRange`        | IPv4         | in subnet, not network/broadcast                | First IP in the DHCP distribution range                              |
 | `endRange`          | IPv4         | in subnet, not network/broadcast, >= startRange | Last IP in the DHCP distribution range                               |
 | `leaseDurationDays` | integer      | 1–3650                                          | Lease duration sent to clients                                       |
-| `gateway`           | IPv4 or empty string | optional; when set, in subnet and not network/broadcast | Default gateway (DHCP option 3)                       |
 | `dns.servers`       | list of IPv4 | at least one required                           | DNS servers sent to clients (DHCP option 6)                          |
 | `dns.domain`        | string       | max 256 chars                                   | DNS search domain sent to clients (DHCP option 15)                   |
 
@@ -75,7 +74,7 @@ dhcp_values:
 | Field         | Type           | Default | Description                                                                |
 | ------------- | -------------- | ------- | -------------------------------------------------------------------------- |
 | `description` | string         | `""`    | Free-text scope description. `null` and omitting are both treated as `""`. |
-| `gateway`     | IPv4 or `""`   | `""`    | Default gateway/router option. `""`, `null`, and omitting all mean unset.  |
+| `gateway`     | IPv4 or `""`   | `""`    | Default gateway/router option. `""`, `null`, and omitting all mean unset. When set, must be in the subnet. If inside `[startRange, endRange]`, must be covered by an exclusion. |
 | `dns.domain`  | string         | `""`    | Can be omitted or set to `""` if no domain suffix is needed.               |
 | `exclusions`  | list           | `[]`    | IP ranges excluded from distribution (see section below).                  |
 | `failover`    | object or null | `null`  | Failover configuration (see section below). `null` = no failover.          |
@@ -143,6 +142,25 @@ Rules enforced by the API and CI validator:
 - No duplicate ranges (identical start+end pair).
 - No overlapping ranges (ranges must not share any IP).
 - **List must be in ascending IP numerical order.** The API always returns exclusions sorted by startAddress. If your values file has a different order, Crossplane will detect a mismatch and PUT every 60 seconds. Always list exclusions in ascending IP order.
+
+Exclusions may cover addresses anywhere within the subnet — they do not need to fall inside `[startRange, endRange]`. Addresses outside the distribution range are never leased regardless, but including them as exclusions (e.g. the gateway or an infrastructure range below `startRange`) is valid.
+
+**Gateway-in-range rule:** if `gateway` is inside `[startRange, endRange]`, it **must** be covered by an exclusion. Without one, the backend rejects the configuration with `422 VALIDATION_ERROR` to prevent the DHCP server from leasing the gateway IP to a client.
+
+```yaml
+# Gateway inside the distribution range — must be excluded:
+startRange: "10.20.30.100"
+endRange: "10.20.30.200"
+gateway: "10.20.30.100"
+exclusions:
+  - startAddress: "10.20.30.100"
+    endAddress: "10.20.30.100"
+
+# Common pattern — gateway is below startRange, no exclusion needed:
+startRange: "10.20.30.11"
+endRange: "10.20.30.240"
+gateway: "10.20.30.1"   # below startRange, never leased
+```
 
 To exclude no IPs, omit the key or set `exclusions: []`.
 
@@ -216,7 +234,7 @@ Set `failover: null` (or omit the key). Do not use `failover: {}` — Helm deep-
 
 ```
 
-The validator checks: IP format, subnet consistency, startRange/endRange ordering, gateway in subnet when set, exclusions in subnet, network/broadcast address rejection, no overlapping exclusions, and failover mode-specific required fields. `gateway: ""` is accepted and means DHCP option 3 is unset.
+The validator checks: IP format, subnet consistency, startRange/endRange ordering, gateway in subnet when set, gateway not inside `[startRange, endRange]` without a covering exclusion, exclusions in subnet, network/broadcast address rejection, no overlapping exclusions, and failover mode-specific required fields. `gateway: ""` is accepted and means DHCP option 3 is unset.
 
 ---
 
