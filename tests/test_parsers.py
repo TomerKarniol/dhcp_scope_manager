@@ -290,6 +290,20 @@ def test_returned_payload_comparable_with_post_put_body(
     }
 
 
+def test_build_payload_without_gateway_returns_null(mock_ps_scope_raw, mock_ps_exclusions_raw):
+    state = normalize_get_scope_state(
+        _scope_state(
+            mock_ps_scope_raw,
+            [{"OptionId": 6, "Value": ["10.0.0.53"]}],
+            mock_ps_exclusions_raw,
+        )
+    )
+    result = build_payload_from_scope_state("10.20.30.0", state)
+
+    assert result.gateway is None
+    assert result.model_dump(mode="json")["gateway"] is None
+
+
 def test_build_payload_without_dns_servers_is_invalid_managed_state(mock_ps_scope_raw):
     state = normalize_get_scope_state(
         _scope_state(

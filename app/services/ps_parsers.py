@@ -100,6 +100,12 @@ def extract_option(options: list, option_id: int) -> str:
     return ""
 
 
+def extract_optional_option(options: list, option_id: int) -> str | None:
+    """Extract the first value of an optional DHCP option, or None when absent."""
+    value = extract_option(options, option_id)
+    return value or None
+
+
 def extract_option_list(options: list, option_id: int) -> list[str]:
     """Extract all values of a DHCP option by OptionId as a list."""
     for opt in options:
@@ -179,7 +185,7 @@ def build_payload_from_scope_state(scope_id: str, state: dict[str, Any]) -> Dhcp
         endRange=str(scope.get("EndRange", "")),
         leaseDurationDays=lease_days,
         description=str(scope.get("Description") or ""),
-        gateway=extract_option(options, 3),
+        gateway=extract_optional_option(options, 3),
         dnsServers=dns_servers,
         dnsDomain=extract_option(options, 15),
         exclusions=exclusions,

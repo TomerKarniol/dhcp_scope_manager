@@ -226,6 +226,21 @@ class TestHelmPayloadBody:
         body = self._body(values)
         assert body.get("description") == "" or body.get("description") is not None
 
+    def test_gateway_omitted_renders_null(self):
+        values = _VALID_VALUES.replace('  gateway: "10.20.30.1"\n', "")
+        body = self._body(values)
+        assert body["gateway"] is None
+
+    def test_gateway_null_renders_null(self):
+        values = _VALID_VALUES.replace('  gateway: "10.20.30.1"', "  gateway: null")
+        body = self._body(values)
+        assert body["gateway"] is None
+
+    def test_gateway_empty_string_renders_null(self):
+        values = _VALID_VALUES.replace('  gateway: "10.20.30.1"', '  gateway: ""')
+        body = self._body(values)
+        assert body["gateway"] is None
+
     def test_exclusions_as_list(self):
         values = _VALID_VALUES + textwrap.dedent("""\
               exclusions:

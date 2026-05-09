@@ -100,6 +100,27 @@ class TestCreateScope:
         commands = [c.args[0] for c in mock_ps.call_args_list if c.args]
         assert any("Set-DhcpServerv4OptionValue" in cmd for cmd in commands)
 
+    async def test_create_without_gateway_does_not_set_router(self):
+        payload = _make_scope(gateway=None)
+        result = _make_scope(gateway=None)
+
+        with patch("app.services.scope_service.run_ps") as mock_ps, \
+             patch("app.services.scope_service.assemble_scope_state", return_value=result):
+            mock_ps.side_effect = [
+                None,  # scope_exists → not found
+                None,  # Add-DhcpServerv4Scope
+                None,  # Set-DhcpServerv4OptionValue
+            ]
+            from app.services import scope_service
+            await scope_service.create_scope(payload)
+
+        option_cmd = next(
+            c.args[0] for c in mock_ps.call_args_list
+            if c.args and "Set-DhcpServerv4OptionValue" in c.args[0]
+        )
+        assert "-DnsServer" in option_cmd
+        assert "-Router" not in option_cmd
+
     async def test_exclusion_commands_issued_for_each_exclusion(self):
         payload = _make_scope(exclusions=[
             DhcpExclusion(startAddress="10.20.30.1", endAddress="10.20.30.10"),

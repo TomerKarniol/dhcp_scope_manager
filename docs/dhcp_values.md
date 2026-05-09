@@ -29,7 +29,7 @@ dhcp_values:
   endRange: "10.20.30.240"
   leaseDurationDays: 8
   description: "DHCP scope for cluster-a"
-  gateway: "10.20.30.1"
+  gateway: "10.20.30.1" # optional; set "" when no router option is needed
 
   dns:
     servers:
@@ -66,7 +66,7 @@ dhcp_values:
 | `startRange`        | IPv4         | in subnet, not network/broadcast                | First IP in the DHCP distribution range                              |
 | `endRange`          | IPv4         | in subnet, not network/broadcast, >= startRange | Last IP in the DHCP distribution range                               |
 | `leaseDurationDays` | integer      | 1–3650                                          | Lease duration sent to clients                                       |
-| `gateway`           | IPv4         | in subnet, not network/broadcast                | Default gateway (DHCP option 3)                                      |
+| `gateway`           | IPv4 or empty string | optional; when set, in subnet and not network/broadcast | Default gateway (DHCP option 3)                       |
 | `dns.servers`       | list of IPv4 | at least one required                           | DNS servers sent to clients (DHCP option 6)                          |
 | `dns.domain`        | string       | max 256 chars                                   | DNS search domain sent to clients (DHCP option 15)                   |
 
@@ -75,6 +75,7 @@ dhcp_values:
 | Field         | Type           | Default | Description                                                                |
 | ------------- | -------------- | ------- | -------------------------------------------------------------------------- |
 | `description` | string         | `""`    | Free-text scope description. `null` and omitting are both treated as `""`. |
+| `gateway`     | IPv4 or `""`   | `""`    | Default gateway/router option. `""`, `null`, and omitting all mean unset.  |
 | `dns.domain`  | string         | `""`    | Can be omitted or set to `""` if no domain suffix is needed.               |
 | `exclusions`  | list           | `[]`    | IP ranges excluded from distribution (see section below).                  |
 | `failover`    | object or null | `null`  | Failover configuration (see section below). `null` = no failover.          |
@@ -83,18 +84,25 @@ dhcp_values:
 
 ## Setting optional values
 
-For optional string fields, these are all equivalent:
+For optional scalar fields, use `""` when you do not want to set a value:
 
 ```yaml
-description: ""          # explicit empty string (preferred)
-description: null        # normalized to "" by the API
-description:             # bare null in YAML — same as null
-# (omit the key entirely)  # uses default ""
+description: ""  # no scope description
+gateway: ""      # no router/default gateway option
+dns:
+  domain: ""     # no DNS search domain
 ```
 
-Use `description: ""` as the canonical form. It is unambiguous in all YAML parsers.
+For these scalar fields, `null`, a bare empty YAML value, and omitting the key are also accepted. Use `""` as the canonical form because it is explicit and unambiguous in all YAML parsers.
 
-**Exception — `failover`:** This is an object, not a string. Use `failover: null` (not `""`) to explicitly disable failover. Do not use `failover: {}` — Helm deep-merges an empty map, so any inherited failover values survive.
+For optional non-scalar fields, use the field's natural empty value:
+
+```yaml
+exclusions: []  # no exclusion ranges
+failover: null  # no failover relationship
+```
+
+Do not use `failover: ""` or `failover: {}`. `failover` is an object, and Helm deep-merges `{}` with inherited values, so any inherited failover values survive.
 
 ---
 
@@ -208,7 +216,7 @@ Set `failover: null` (or omit the key). Do not use `failover: {}` — Helm deep-
 
 ```
 
-The validator checks: IP format, subnet consistency, startRange/endRange ordering, gateway in subnet, exclusions in subnet, network/broadcast address rejection, no overlapping exclusions, and failover mode-specific required fields.
+The validator checks: IP format, subnet consistency, startRange/endRange ordering, gateway in subnet when set, exclusions in subnet, network/broadcast address rejection, no overlapping exclusions, and failover mode-specific required fields. `gateway: ""` is accepted and means DHCP option 3 is unset.
 
 ---
 

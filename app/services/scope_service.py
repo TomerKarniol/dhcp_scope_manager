@@ -23,6 +23,17 @@ def _is_already_exists_error(stderr: str) -> bool:
     return any(kw in lower for kw in ("already exists", "already been added", "already in use"))
 
 
+def _set_options_command(scope_literal: str, payload: DhcpScopePayload) -> str:
+    cmd = (
+        f"Set-DhcpServerv4OptionValue -ScopeId {scope_literal} "
+        f"-DnsServer {ps_ipv4_csv(payload.dnsServers)} "
+        f"-DnsDomain {ps_single_quote(payload.dnsDomain)}"
+    )
+    if payload.gateway is not None:
+        cmd += f" -Router {ps_ipv4(payload.gateway)}"
+    return cmd
+
+
 # ---------------------------------------------------------------------------
 # PS execution helper  (single entry point with explicit error-handling policy)
 # ---------------------------------------------------------------------------
@@ -171,12 +182,8 @@ async def create_scope(payload: DhcpScopePayload) -> DhcpScopePayload:
                 extra=_scope_extra(scope_id, "create_scope", status="already_exists"),
             )
 
-        dns_str = ps_ipv4_csv(payload.dnsServers)
         await run_ps(
-            f"Set-DhcpServerv4OptionValue -ScopeId {scope_literal} "
-            f"-Router {ps_ipv4(payload.gateway)} "
-            f"-DnsServer {dns_str} "
-            f"-DnsDomain {ps_single_quote(payload.dnsDomain)}",
+            _set_options_command(scope_literal, payload),
             parse_json=False,
             scope_id=scope_id,
             operation="set_dns_options",
@@ -237,8 +244,7 @@ async def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePay
             )
 
         if (
-            current.gateway != desired.gateway
-            or current.dnsServers != desired.dnsServers
+            current.dnsServers != desired.dnsServers
             or current.dnsDomain != desired.dnsDomain
         ):
             changed = True
@@ -246,16 +252,40 @@ async def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePay
                 "Updating DHCP scope options",
                 extra=_scope_extra(scope_id, "set_dns_options"),
             )
-            dns_str = ps_ipv4_csv(desired.dnsServers)
             await run_ps(
-                f"Set-DhcpServerv4OptionValue -ScopeId {scope_literal} "
-                f"-Router {ps_ipv4(desired.gateway)} "
-                f"-DnsServer {dns_str} "
-                f"-DnsDomain {ps_single_quote(desired.dnsDomain)}",
+                _set_options_command(scope_literal, desired),
                 parse_json=False,
                 scope_id=scope_id,
                 operation="set_dns_options",
             )
+
+        if current.gateway != desired.gateway:
+            changed = True
+            if desired.gateway is None:
+                logger.info(
+                    "Removing DHCP router option",
+                    extra=_scope_extra(scope_id, "remove_router_option"),
+                )
+                await _run_ps(
+                    f"Remove-DhcpServerv4OptionValue -ScopeId {scope_literal} "
+                    f"-OptionId 3",
+                    parse_json=False,
+                    ignore_not_found=True,
+                    scope_id=scope_id,
+                    operation="remove_router_option",
+                )
+            else:
+                logger.info(
+                    "Updating DHCP router option",
+                    extra=_scope_extra(scope_id, "set_router_option"),
+                )
+                await run_ps(
+                    f"Set-DhcpServerv4OptionValue -ScopeId {scope_literal} "
+                    f"-Router {ps_ipv4(desired.gateway)}",
+                    parse_json=False,
+                    scope_id=scope_id,
+                    operation="set_router_option",
+                )
 
         current_excl = {(e.startAddress, e.endAddress) for e in current.exclusions}
         desired_excl = {(e.startAddress, e.endAddress) for e in desired.exclusions}

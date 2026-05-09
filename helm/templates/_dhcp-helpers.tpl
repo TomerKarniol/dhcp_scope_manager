@@ -14,7 +14,7 @@ startRange: {{ $v.startRange | quote }}
 endRange: {{ $v.endRange | quote }}
 leaseDurationDays: {{ $v.leaseDurationDays | int }}
 description: {{ $v.description | default "" | quote }}
-gateway: {{ $v.gateway | quote }}
+gateway: {{ if hasKey $v "gateway" }}{{ $v.gateway | default nil | toJson }}{{ else }}null{{ end }}
 dnsServers: {{ $dnsServers | toJson }}
 dnsDomain: {{ $dnsDomain | quote }}
 exclusions: {{ $v.exclusions | default (list) | toJson }}

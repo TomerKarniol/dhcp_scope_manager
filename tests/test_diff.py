@@ -74,6 +74,25 @@ async def test_gateway_changed():
     calls = await _run_update(current, desired)
     ps_commands = [c.args[0] for c in calls]
     assert any("Set-DhcpServerv4OptionValue" in cmd for cmd in ps_commands)
+    assert any("-Router '10.20.30.2'" in cmd for cmd in ps_commands)
+
+
+async def test_gateway_removed():
+    current = _make_scope(gateway="10.20.30.1")
+    desired = _make_scope(gateway=None)
+    calls = await _run_update(current, desired)
+    ps_commands = [c.args[0] for c in calls]
+    assert any("Remove-DhcpServerv4OptionValue" in cmd and "-OptionId 3" in cmd for cmd in ps_commands)
+
+
+async def test_dns_changed_without_gateway_does_not_set_router():
+    current = _make_scope(gateway=None, dnsServers=["10.0.0.53"])
+    desired = _make_scope(gateway=None, dnsServers=["10.0.0.53", "10.0.0.54"])
+    calls = await _run_update(current, desired)
+    ps_commands = [c.args[0] for c in calls]
+    set_cmd = next(cmd for cmd in ps_commands if "Set-DhcpServerv4OptionValue" in cmd)
+    assert "-DnsServer" in set_cmd
+    assert "-Router" not in set_cmd
 
 
 async def test_dns_changed():

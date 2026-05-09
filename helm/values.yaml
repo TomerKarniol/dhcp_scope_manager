@@ -19,7 +19,8 @@ dhcp_values:
   endRange: "10.20.30.240"
   leaseDurationDays: 8
   description: "DHCP scope for tomer hosted cluster"
-  gateway: "10.20.30.1"
+  # Optional. Set to "" when no router/default gateway option is needed.
+  gateway: ""
 
   dns:
     # IMPORTANT: DNS server order is preserved exactly as written here.

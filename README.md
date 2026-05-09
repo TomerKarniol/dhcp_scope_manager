@@ -297,7 +297,7 @@ Diff-based convergence — compares the current scope state to the desired paylo
 | Changed fields                                                            | PowerShell cmdlet                                                                            |
 | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `scopeName`, `leaseDurationDays`, `description`, `startRange`, `endRange` | `Set-DhcpServerv4Scope`                                                                      |
-| `gateway`, `dnsServers`, `dnsDomain`                                      | `Set-DhcpServerv4OptionValue`                                                                |
+| `gateway`, `dnsServers`, `dnsDomain`                                      | `Set-DhcpServerv4OptionValue`; `gateway: null` removes DHCP option 3                         |
 | Exclusions added                                                          | `Add-DhcpServerv4ExclusionRange`                                                             |
 | Exclusions removed                                                        | `Remove-DhcpServerv4ExclusionRange`                                                          |
 | Failover added / changed / removed                                        | `Add-DhcpServerv4Failover` / `Set-DhcpServerv4Failover` / `Remove-DhcpServerv4FailoverScope` |
@@ -383,6 +383,7 @@ Environment validation is async-safe and cached per process. A successful check 
 - `failover` is either `null` or a full failover object (no partial objects).
 - Exclusions are always returned sorted by IP (ascending). Values files must match this order.
 - `dnsServers` must contain at least one IPv4 address. If GET observes a managed scope without DNS servers, the backend treats that as invalid managed state instead of returning a pretend-valid payload.
+- `gateway` is optional. In values files, use `gateway: ""` when you do not want DHCP option 3; the API also accepts `null`/omitted and GET returns `null` when absent.
 - DNS server order is preserved exactly (primary/secondary semantics — never sorted).
 - `description` defaults to `""` (never `null`).
 
@@ -409,8 +410,8 @@ Key behaviors:
 - **Required fields** — strict DHCP payload validation is enforced by the backend/Pydantic model
   and the optional CI validator, not by large Helm `required()` blocks. The chart keeps only the
   minimal existing render-time checks needed to form the Request URL/name.
-- **Optional defaults** — `description` and `dns.domain` render as `""`, `exclusions` renders as
-  `[]`, and disabled failover renders as `null`.
+- **Optional defaults** — `description`, `gateway`, and `dns.domain` can be written as `""`,
+  `exclusions` renders as `[]`, and disabled failover renders as `null`.
 - **`providerConfigRef.name`** is configurable via `crossplane.providerConfigName`
   (defaults to `dhcp-http`).
 

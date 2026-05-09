@@ -163,6 +163,39 @@ def test_scope_payload_valid(sample_scope_payload):
     assert str(sample_scope_payload.gateway) == "10.20.30.1"
 
 
+def test_scope_gateway_can_be_omitted():
+    payload = DhcpScopePayload(
+        scopeName="Test",
+        network="10.20.30.0",
+        subnetMask="255.255.255.0",
+        startRange="10.20.30.100",
+        endRange="10.20.30.200",
+        leaseDurationDays=8,
+        description="",
+        dnsServers=["10.0.0.53"],
+        dnsDomain="",
+        exclusions=[],
+    )
+    assert payload.gateway is None
+
+
+def test_scope_gateway_empty_string_normalizes_to_none():
+    payload = DhcpScopePayload(
+        scopeName="Test",
+        network="10.20.30.0",
+        subnetMask="255.255.255.0",
+        startRange="10.20.30.100",
+        endRange="10.20.30.200",
+        leaseDurationDays=8,
+        description="",
+        gateway="",
+        dnsServers=["10.0.0.53"],
+        dnsDomain="",
+        exclusions=[],
+    )
+    assert payload.gateway is None
+
+
 def test_scope_end_range_before_start_range():
     with pytest.raises(ValidationError) as exc_info:
         DhcpScopePayload(

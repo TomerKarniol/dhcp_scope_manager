@@ -62,10 +62,19 @@ class DhcpScopePayload(BaseModel):
         if v is None:
             return ""
         return v
-    gateway: IPv4Address = Field(
+    gateway: Optional[IPv4Address] = Field(
+        default=None,
         description="Default gateway sent to clients (DHCP option 3)",
         examples=["10.20.30.1"],
     )
+
+    @field_validator("gateway", mode="before")
+    @classmethod
+    def normalize_gateway(cls, v: object) -> object:
+        """Normalize empty gateway values to null — DHCP option 3 is optional."""
+        if v == "":
+            return None
+        return v
     dnsServers: list[IPv4Address] = Field(
         default_factory=list,
         min_length=1,
@@ -159,10 +168,11 @@ class DhcpScopePayload(BaseModel):
         for field, ip in [
             ("startRange", self.startRange),
             ("endRange", self.endRange),
-            ("gateway", self.gateway),
         ]:
             if ip not in subnet:
                 raise ValueError(f"{field} {ip} is not within subnet {subnet}")
+        if self.gateway is not None and self.gateway not in subnet:
+            raise ValueError(f"gateway {self.gateway} is not within subnet {subnet}")
 
         for i, excl in enumerate(self.exclusions):
             for attr in ("startAddress", "endAddress"):
@@ -177,7 +187,6 @@ class DhcpScopePayload(BaseModel):
         net_addr = subnet.network_address
         bcast_addr = subnet.broadcast_address
         for field, ip in [
-            ("gateway", self.gateway),
             ("startRange", self.startRange),
             ("endRange", self.endRange),
         ]:
@@ -188,6 +197,15 @@ class DhcpScopePayload(BaseModel):
             if ip == bcast_addr:
                 raise ValueError(
                     f"{field} {ip} must not be the broadcast address {bcast_addr}"
+                )
+        if self.gateway is not None:
+            if self.gateway == net_addr:
+                raise ValueError(
+                    f"gateway {self.gateway} must not be the network address {net_addr}"
+                )
+            if self.gateway == bcast_addr:
+                raise ValueError(
+                    f"gateway {self.gateway} must not be the broadcast address {bcast_addr}"
                 )
 
         return self
