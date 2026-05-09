@@ -192,7 +192,7 @@ def test_scope_invalid_network_ip():
             leaseDurationDays=8,
             description="",
             gateway="10.20.30.1",
-            dnsServers=[],
+            dnsServers=["10.0.0.53"],
             dnsDomain="",
             exclusions=[],
         )
@@ -209,7 +209,7 @@ def test_scope_invalid_gateway_ip():
             leaseDurationDays=8,
             description="",
             gateway="not-an-ip",
-            dnsServers=[],
+            dnsServers=["10.0.0.53"],
             dnsDomain="",
             exclusions=[],
         )
@@ -243,7 +243,7 @@ def test_scope_lease_duration_zero():
             leaseDurationDays=0,
             description="",
             gateway="10.20.30.1",
-            dnsServers=[],
+            dnsServers=["10.0.0.53"],
             dnsDomain="",
             exclusions=[],
         )
@@ -260,7 +260,7 @@ def test_scope_lease_duration_too_high():
             leaseDurationDays=3651,
             description="",
             gateway="10.20.30.1",
-            dnsServers=[],
+            dnsServers=["10.0.0.53"],
             dnsDomain="",
             exclusions=[],
         )
@@ -277,7 +277,7 @@ def test_scope_empty_name_invalid():
             leaseDurationDays=8,
             description="",
             gateway="10.20.30.1",
-            dnsServers=[],
+            dnsServers=["10.0.0.53"],
             dnsDomain="",
             exclusions=[],
         )
@@ -308,7 +308,7 @@ def _minimal_scope(**overrides):
         leaseDurationDays=8,
         description="",
         gateway="10.20.30.1",
-        dnsServers=[],
+        dnsServers=["10.0.0.53"],
         dnsDomain="",
         exclusions=[],
     )
@@ -522,7 +522,7 @@ def test_description_none_normalizes_to_empty_string():
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
         startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
         description=None,  # explicit null
-        gateway="10.0.0.1", dnsServers=[], dnsDomain="", exclusions=[],
+        gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain="", exclusions=[],
     )
     assert scope.description == ""
 
@@ -533,7 +533,7 @@ def test_description_empty_string_accepted():
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
         startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
         description="",
-        gateway="10.0.0.1", dnsServers=[], dnsDomain="", exclusions=[],
+        gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain="", exclusions=[],
     )
     assert scope.description == ""
 
@@ -684,6 +684,6 @@ def test_dns_domain_none_normalizes_to_empty_string():
     scope = DhcpScopePayload(
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
         startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
-        description="", gateway="10.0.0.1", dnsServers=[], dnsDomain=None, exclusions=[],
+        description="", gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain=None, exclusions=[],
     )
     assert scope.dnsDomain == ""

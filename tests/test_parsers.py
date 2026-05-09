@@ -1,6 +1,6 @@
 from unittest.mock import AsyncMock, patch
 import pytest
-from app.errors import InvalidScopeIdError
+from app.errors import DhcpConflictError, InvalidScopeIdError
 from app.services.ps_executor import PowerShellError
 from app.services.ps_parsers import (
     build_get_scope_state_script,
@@ -77,6 +77,10 @@ def test_normalize_list_list():
     assert normalize_list(lst) == lst
 
 
+def test_normalize_list_scalar_string():
+    assert normalize_list("10.0.0.53") == ["10.0.0.53"]
+
+
 def test_extract_option_router(mock_ps_options_raw):
     result = extract_option(mock_ps_options_raw, 3)
     assert result == "10.20.30.1"
@@ -95,6 +99,21 @@ def test_extract_option_domain(mock_ps_options_raw):
 def test_extract_option_missing(mock_ps_options_raw):
     assert extract_option(mock_ps_options_raw, 999) == ""
     assert extract_option_list(mock_ps_options_raw, 999) == []
+
+
+def test_extract_option_scalar_string_value_not_split():
+    options = [{"OptionId": 3, "Value": "10.20.30.1"}]
+    assert extract_option(options, 3) == "10.20.30.1"
+
+
+def test_extract_option_list_scalar_string_value_not_split():
+    options = [{"OptionId": 6, "Value": "10.0.0.53"}]
+    assert extract_option_list(options, 6) == ["10.0.0.53"]
+
+
+def test_extract_option_list_none_value_returns_empty():
+    options = [{"OptionId": 6, "Value": None}]
+    assert extract_option_list(options, 6) == []
 
 
 def _scope_state(scope, options, exclusions=None, failover=None):
@@ -139,6 +158,7 @@ async def test_assemble_scope_state(
     assert result.failover is not None
     assert result.failover.relationshipName == "mce1-failover"
     assert result.failover.maxClientLeadTimeMinutes == 60
+    assert result.failover.sharedSecret is None
 
 
 @pytest.mark.asyncio
@@ -269,6 +289,24 @@ def test_returned_payload_comparable_with_post_put_body(
         "exclusions": [{"startAddress": "10.20.30.1", "endAddress": "10.20.30.99"}],
         "failover": None,
     }
+
+
+def test_build_payload_without_dns_servers_is_invalid_managed_state(mock_ps_scope_raw):
+    state = normalize_get_scope_state(
+        _scope_state(
+            mock_ps_scope_raw,
+            [{"OptionId": 3, "Value": ["10.20.30.1"]}],
+        )
+    )
+    with pytest.raises(DhcpConflictError):
+        build_payload_from_scope_state("10.20.30.0", state)
+
+
+def test_parse_failover_does_not_return_shared_secret(mock_ps_failover_raw):
+    raw = {**mock_ps_failover_raw, "SharedSecret": "server-secret"}
+    result = parse_failover(raw)
+    assert result.sharedSecret is None
+    assert "sharedSecret" not in result.model_dump(mode="json")
 
 
 def test_invalid_or_unsafe_scope_id_cannot_inject_powershell():

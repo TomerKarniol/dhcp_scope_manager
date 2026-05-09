@@ -14,7 +14,7 @@ from app.services.dhcp_service import DhcpEnvironmentError, DhcpEnvReason
 from app.services.ps_executor import (
     PowerShellError,
     PowerShellTimeoutError,
-    redact_powershell_command,
+    sanitize_powershell_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,8 +26,7 @@ _MAX_PS_ERROR_LEN = 500
 
 def _sanitize_text(value: str, *, max_len: int = _MAX_PS_ERROR_LEN) -> str:
     """Remove high-risk infrastructure details before returning text to clients."""
-    sanitized = _WIN_PATH_RE.sub("<path>", value)
-    return sanitized[:max_len]
+    return sanitize_powershell_text(_WIN_PATH_RE.sub("<path>", value), max_len=max_len)
 
 
 def _error_content(
@@ -181,14 +180,18 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(PowerShellError)
     async def powershell_error_handler(request: Request, exc: PowerShellError) -> JSONResponse:
         safe_stderr = _sanitize_text(exc.stderr)
-        safe_command = redact_powershell_command(exc.command)
         logger.error(
-            "PowerShell error on %s %s rc=%s cmd=%r stderr=%r",
+            "PowerShell error on %s %s",
             request.method,
             request.url.path,
-            exc.returncode,
-            safe_command,
-            safe_stderr,
+            extra={
+                "scope_id": exc.scope_id,
+                "operation": exc.operation or "powershell",
+                "returncode": exc.returncode,
+                "status": "failed",
+                "error_code": ErrorCode.POWERSHELL_COMMAND_FAILED,
+                "stderr_preview": safe_stderr,
+            },
             exc_info=True,
         )
 

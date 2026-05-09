@@ -185,6 +185,12 @@ class TestRedactPowershellCommand:
         redacted = redact_powershell_command(cmd)
         assert "CaSeSensItIvE" not in redacted
 
+    def test_redacts_single_quoted_shared_secret(self):
+        cmd = "Set-DhcpServerv4Failover -SharedSecret 'sec''ret' -Force"
+        redacted = redact_powershell_command(cmd)
+        assert "sec''ret" not in redacted
+        assert "***REDACTED***" in redacted
+
     def test_leaves_non_secret_params_unchanged(self):
         cmd = 'Add-DhcpServerv4Scope -Name "myscope" -SubnetMask 255.255.255.0'
         assert redact_powershell_command(cmd) == cmd

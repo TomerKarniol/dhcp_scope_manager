@@ -277,7 +277,7 @@ class TestRouteLevelProtection:
             "scopeName": "Test", "network": "10.20.30.0", "subnetMask": "255.255.255.0",
             "startRange": "10.20.30.100", "endRange": "10.20.30.200",
             "leaseDurationDays": 8, "description": "", "gateway": "10.20.30.1",
-            "dnsServers": [], "dnsDomain": "", "exclusions": [], "failover": None,
+            "dnsServers": ["10.0.0.53"], "dnsDomain": "", "exclusions": [], "failover": None,
         }
         with patch("app.services.dhcp_service.validate_dhcp_environment", side_effect=exc):
             r = await _request("POST", "/api/v1/scopes/10.20.30.0", json=payload)

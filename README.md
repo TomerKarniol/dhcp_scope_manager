@@ -56,12 +56,12 @@ app/
     ip_utils.py              IP integer conversion and TimeSpan parsing helpers
     locks.py                 Async per-scope lock manager for serialized mutations
 
-helm/hosted-cluster-integration/
+helm/
   Chart.yaml
   values.yaml                Reference values file with all supported fields documented
   templates/
     dhcp-scope-request.yaml  Crossplane Request CR — all verbs (POST/GET/PUT/DELETE) on /{network}
-    _dhcp-helpers.tpl        Canonical payload rendering with required-field enforcement
+    _dhcp-helpers.tpl        Canonical payload rendering for provider-http
 
 scripts/
   validate_dhcp_values.py    Self-contained Pydantic validator — call with one or more values files
@@ -119,7 +119,7 @@ pip install -r requirements.txt
 | `LOG_LEVEL`                            | `INFO`    | Log level                                                     |
 | `POWERSHELL_COMMAND_TIMEOUT_SECONDS`   | `60`      | Timeout for DHCP PowerShell operations.                       |
 | `POWERSHELL_ENV_CHECK_TIMEOUT_SECONDS` | `15`      | Timeout for PowerShell startup/cmdlet availability checks.    |
-| `POWERSHELL_MAX_CONCURRENCY`           | `5`       | Maximum concurrent PowerShell commands across all requests.   |
+| `POWERSHELL_MAX_CONCURRENCY`           | `10`      | Maximum concurrent PowerShell commands across all requests.   |
 
 A `.env` file in the repo root is also supported.
 
@@ -203,7 +203,7 @@ All API errors use the same envelope:
 - `error.message` is human-readable and safe to expose.
 - `error.details` contains sanitized structured context such as `scopeId`, `network`, validation errors, or DHCP environment `reason`.
 
-Raw PowerShell commands, shared secrets, stack traces, and full internal stderr are not returned to clients. Backend logs include the exception type, request path, sanitized command, sanitized stderr, and traceback where useful.
+Raw PowerShell commands, shared secrets, stack traces, and full internal stderr are not returned to clients. Backend logs use safe context such as request path, `scope_id`, operation name, return code, and sanitized stderr previews.
 
 Common error codes:
 
@@ -382,6 +382,7 @@ Environment validation is async-safe and cached per process. A successful check 
 - Field order is intentional and tested — Crossplane byte-compares GET response to PUT body.
 - `failover` is either `null` or a full failover object (no partial objects).
 - Exclusions are always returned sorted by IP (ascending). Values files must match this order.
+- `dnsServers` must contain at least one IPv4 address. If GET observes a managed scope without DNS servers, the backend treats that as invalid managed state instead of returning a pretend-valid payload.
 - DNS server order is preserved exactly (primary/secondary semantics — never sorted).
 - `description` defaults to `""` (never `null`).
 
@@ -397,24 +398,32 @@ Supported modes: `HotStandby`, `LoadBalance`
 Normalization at both the Helm template layer and the Pydantic model layer prevents GET/PUT drift
 when values include cross-mode fields.
 
+`sharedSecret` is write-only apply input. Microsoft DHCP PowerShell accepts `-SharedSecret`
+on `Add-DhcpServerv4Failover` / `Set-DhcpServerv4Failover`, but `Get-DhcpServerv4Failover`
+does not return the plaintext secret. The backend therefore accepts `sharedSecret` on direct
+POST/PUT input, uses it only while applying failover, and excludes it from GET/list responses,
+logs, and Helm-rendered comparison bodies.
+
 ## Helm Chart
 
-The chart under `helm/hosted-cluster-integration` renders a single Crossplane `Request` CR.
+The chart under `helm/` renders a single Crossplane `Request` CR.
 
 Key behaviors:
 
 - **Crossplane object name** is based only on `dhcp_values.network` (`dhcp-scope-10-20-30-0`).
   Changing `scopeName` does **not** create a new Crossplane CR or delete the live scope.
-- **Required fields** — `helm template` fails with a clear error if any of these are missing:
-  `dhcp_values.network`, `dhcp_values.scopeName`, `dhcp_values.subnetMask`, `dhcp_values.startRange`,
-  `dhcp_values.endRange`, `dhcp_values.leaseDurationDays`, `dhcp_values.gateway`,
-  `dhcp_values.dns.servers`, `dhcp_values.dns.domain`, `apiServer.url`
+- **Required fields** — strict DHCP payload validation is enforced by the backend/Pydantic model
+  and the optional CI validator, not by large Helm `required()` blocks. The chart keeps only the
+  minimal existing render-time checks needed to form the Request URL/name.
+- **Optional defaults** — `description` and `dns.domain` render as `""`, `exclusions` renders as
+  `[]`, and disabled failover renders as `null`.
+- **Failover shared secret** — intentionally not rendered into `payload.body`, because Windows
+  does not return it on GET and Crossplane would otherwise see perpetual drift or expose a secret.
 - **`providerConfigRef.name`** is configurable via `crossplane.providerConfigName`
   (defaults to `dhcp-http`).
 
 ```bash
-helm template dhcp-request ./helm/hosted-cluster-integration \
-  -f ./helm/hosted-cluster-integration/values.yaml
+helm template dhcp-request ./helm -f ./helm/values.yaml
 ```
 
 ## HTTP Response Codes
@@ -495,9 +504,11 @@ validate-dhcp-values:
 - Bearer token auth via `DHCP_API_TOKEN` — optional; disabled when unset
 - Runtime environment guard rejects all scope operations on non-Windows / non-DHCP hosts
 - `-ErrorAction Stop` on every PowerShell command
+- Shared secrets are write-only and are never returned by GET/list responses
 - Shared secrets are never logged
-- PowerShell stderr is sanitized before returning to clients and logs
-- Structured JSON logs include `scope_id`, `operation`, `result`, `duration`
+- PowerShell stderr is sanitized before returning to clients and before logging previews
+- Structured JSON logs include safe fields such as `scope_id`, `operation`, `relationship_name`,
+  `duration_ms`, `status`, and `error_code`
 
 ## Debugging Errors
 
@@ -511,7 +522,7 @@ From backend logs:
 
 - `AppError` entries mean the request failed in an expected, client-safe way.
 - `RequestValidationError` entries include sanitized validation fields and messages, not raw input values.
-- `PowerShellError` entries include return code, sanitized command, sanitized stderr, and traceback.
+- `PowerShellError` entries include return code, operation name, `scope_id` when available, and sanitized stderr preview.
 - `DhcpEnvironmentError` entries include the full internal environment failure detail.
 - `INTERNAL_ERROR` responses mean an unexpected Python exception reached the fallback handler; inspect backend logs for the request path and timestamp.
 
@@ -540,7 +551,7 @@ Test coverage includes:
 - Helm-rendered Crossplane Request contract
 - Security checks for PowerShell escaping, response sanitization, and secret redaction
 
-The full suite currently contains 443 tests. The repository virtualenv is preferred because the system Python may not have runtime dependencies such as `pydantic-settings` installed.
+The repository virtualenv is preferred because the system Python may not have runtime dependencies such as `pydantic-settings` installed.
 
 ## Operational Notes
 

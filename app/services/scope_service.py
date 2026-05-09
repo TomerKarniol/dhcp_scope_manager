@@ -9,12 +9,13 @@ from app.services.ps_parsers import assemble_scope_state, normalize_list
 from app.utils.decorators import log_call
 from app.utils.ip_utils import ip_to_int
 from app.utils.locks import scope_locks
+from app.utils.powershell import ps_ipv4, ps_ipv4_csv, ps_single_quote
 
 logger = logging.getLogger(__name__)
 
 
-def _ps_str(value: str) -> str:
-    return value.replace("`", "``").replace("$", "`$").replace('"', '`"')
+def _scope_extra(scope_id: str, operation: str, **extra: object) -> dict[str, object]:
+    return {"scope_id": str(scope_id), "operation": operation, **extra}
 
 
 def _is_already_exists_error(stderr: str) -> bool:
@@ -34,6 +35,9 @@ async def _run_ps(
     ignore_already_exists: bool = False,
     best_effort: bool = False,
     warn_prefix: str | None = None,
+    scope_id: str | None = None,
+    operation: str | None = None,
+    relationship_name: str | None = None,
 ) -> dict | list | None:
     """Central PowerShell execution helper with explicit error-handling policy.
 
@@ -48,16 +52,39 @@ async def _run_ps(
                                 Use for: per-item cleanup where partial failure is tolerable.
     """
     try:
-        return await run_ps(cmd, parse_json=parse_json)
+        return await run_ps(
+            cmd,
+            parse_json=parse_json,
+            scope_id=scope_id,
+            operation=operation,
+            relationship_name=relationship_name,
+        )
     except PowerShellError as exc:
         if best_effort:
+            logger.warning(
+                "Ignoring best-effort PowerShell failure",
+                extra=_scope_extra(scope_id or "", operation or "powershell", status="ignored"),
+            )
             return None
         if warn_prefix is not None:
-            logger.warning("%s: %s", warn_prefix, exc.stderr)
+            logger.warning(
+                "%s: %s",
+                warn_prefix,
+                exc.safe_stderr_preview,
+                extra=_scope_extra(scope_id or "", operation or "powershell", status="ignored"),
+            )
             return None
         if ignore_not_found and is_not_found_error(exc.stderr):
+            logger.info(
+                "Ignoring DHCP object not found",
+                extra=_scope_extra(scope_id or "", operation or "powershell", status="ignored"),
+            )
             return None
         if ignore_already_exists and _is_already_exists_error(exc.stderr):
+            logger.info(
+                "Ignoring DHCP object already exists",
+                extra=_scope_extra(scope_id or "", operation or "powershell", status="ignored"),
+            )
             return None
         raise
 
@@ -95,7 +122,8 @@ async def _assemble_existing_scope(scope_id: str) -> DhcpScopePayload:
 
 @log_call
 async def list_scopes() -> list[DhcpScopePayload]:
-    raw = await run_ps("Get-DhcpServerv4Scope")
+    logger.info("Listing DHCP scopes", extra={"operation": "list_scopes"})
+    raw = await run_ps("Get-DhcpServerv4Scope", operation="list_scopes")
     entries = normalize_list(raw)
     scope_ids: list[str] = sorted(
         (str(e["ScopeId"]) for e in entries if e.get("ScopeId")),
@@ -105,68 +133,83 @@ async def list_scopes() -> list[DhcpScopePayload]:
 
 
 async def scope_exists(scope_id: str) -> bool:
+    scope_literal = ps_ipv4(scope_id)
     return await _run_ps(
-        f"Get-DhcpServerv4Scope -ScopeId {scope_id}",
+        f"Get-DhcpServerv4Scope -ScopeId {scope_literal}",
         parse_json=True,
         ignore_not_found=True,
+        scope_id=scope_id,
+        operation="scope_exists",
     ) is not None
 
 
 @log_call
 async def create_scope(payload: DhcpScopePayload) -> DhcpScopePayload:
     scope_id = str(payload.network)
+    scope_literal = ps_ipv4(scope_id)
+    logger.info("Creating DHCP scope", extra=_scope_extra(scope_id, "create_scope"))
 
     async with scope_locks.lock(scope_id):
         if not await scope_exists(scope_id):
-            await run_ps(
+            await _run_ps(
                 f'Add-DhcpServerv4Scope '
-                f'-Name "{_ps_str(payload.scopeName)}" '
-                f'-StartRange {payload.startRange} '
-                f'-EndRange {payload.endRange} '
-                f'-SubnetMask {payload.subnetMask} '
+                f'-Name {ps_single_quote(payload.scopeName)} '
+                f'-StartRange {ps_ipv4(payload.startRange)} '
+                f'-EndRange {ps_ipv4(payload.endRange)} '
+                f'-SubnetMask {ps_ipv4(payload.subnetMask)} '
                 f'-State Active '
                 f'-LeaseDuration (New-TimeSpan -Days {payload.leaseDurationDays}) '
-                f'-Description "{_ps_str(payload.description)}"',
-                parse_json=False,
+                f'-Description {ps_single_quote(payload.description)}',
+                ignore_already_exists=True,
+                scope_id=scope_id,
+                operation="add_scope",
             )
         else:
-            logger.info("Scope %s already exists — skipping Add-DhcpServerv4Scope", scope_id)
+            logger.info(
+                "Scope already exists, converging desired state",
+                extra=_scope_extra(scope_id, "create_scope", status="already_exists"),
+            )
 
-        dns_str = ",".join(str(ip) for ip in payload.dnsServers)
+        dns_str = ps_ipv4_csv(payload.dnsServers)
         await run_ps(
-            f"Set-DhcpServerv4OptionValue -ScopeId {scope_id} "
-            f"-Router {payload.gateway} "
+            f"Set-DhcpServerv4OptionValue -ScopeId {scope_literal} "
+            f"-Router {ps_ipv4(payload.gateway)} "
             f"-DnsServer {dns_str} "
-            f'-DnsDomain "{_ps_str(payload.dnsDomain)}"',
+            f"-DnsDomain {ps_single_quote(payload.dnsDomain)}",
             parse_json=False,
+            scope_id=scope_id,
+            operation="set_dns_options",
         )
 
         for excl in payload.exclusions:
             await _run_ps(
-                f"Add-DhcpServerv4ExclusionRange -ScopeId {scope_id} "
-                f"-StartRange {excl.startAddress} -EndRange {excl.endAddress}",
+                f"Add-DhcpServerv4ExclusionRange -ScopeId {scope_literal} "
+                f"-StartRange {ps_ipv4(excl.startAddress)} -EndRange {ps_ipv4(excl.endAddress)}",
                 ignore_already_exists=True,
+                scope_id=scope_id,
+                operation="add_exclusion",
             )
 
         if payload.failover is not None:
             await _setup_failover(scope_id, payload.failover)
-            await run_ps(
-                f"Invoke-DhcpServerv4FailoverReplication -ScopeId {scope_id} -Force",
-                parse_json=False,
-            )
+            await _replicate_failover(scope_id, payload.failover.relationshipName)
 
         return await assemble_scope_state(scope_id)
 
 
 @log_call
 async def get_scope(scope_id: str) -> DhcpScopePayload:
+    logger.info("Getting DHCP scope", extra=_scope_extra(scope_id, "get_scope"))
     return await _assemble_existing_scope(scope_id)
 
 
 @log_call
 async def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePayload:
+    scope_literal = ps_ipv4(scope_id)
+    logger.info("Updating DHCP scope", extra=_scope_extra(scope_id, "update_scope"))
     async with scope_locks.lock(scope_id):
         current = await _assemble_existing_scope(scope_id)
+        changed = False
 
         if (
             current.scopeName != desired.scopeName
@@ -175,15 +218,21 @@ async def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePay
             or current.startRange != desired.startRange
             or current.endRange != desired.endRange
         ):
-            logger.info("Scope %s: updating params (name/lease/description/range)", scope_id)
+            changed = True
+            logger.info(
+                "Updating DHCP scope parameters",
+                extra=_scope_extra(scope_id, "set_scope_params"),
+            )
             await run_ps(
-                f"Set-DhcpServerv4Scope -ScopeId {scope_id} "
-                f'-Name "{_ps_str(desired.scopeName)}" '
+                f"Set-DhcpServerv4Scope -ScopeId {scope_literal} "
+                f"-Name {ps_single_quote(desired.scopeName)} "
                 f"-LeaseDuration (New-TimeSpan -Days {desired.leaseDurationDays}) "
-                f'-Description "{_ps_str(desired.description)}" '
-                f"-StartRange {desired.startRange} "
-                f"-EndRange {desired.endRange}",
+                f"-Description {ps_single_quote(desired.description)} "
+                f"-StartRange {ps_ipv4(desired.startRange)} "
+                f"-EndRange {ps_ipv4(desired.endRange)}",
                 parse_json=False,
+                scope_id=scope_id,
+                operation="set_scope_params",
             )
 
         if (
@@ -191,45 +240,72 @@ async def update_scope(scope_id: str, desired: DhcpScopePayload) -> DhcpScopePay
             or current.dnsServers != desired.dnsServers
             or current.dnsDomain != desired.dnsDomain
         ):
-            logger.info("Scope %s: updating options (gateway/dns/domain)", scope_id)
-            dns_str = ",".join(str(ip) for ip in desired.dnsServers)
+            changed = True
+            logger.info(
+                "Updating DHCP scope options",
+                extra=_scope_extra(scope_id, "set_dns_options"),
+            )
+            dns_str = ps_ipv4_csv(desired.dnsServers)
             await run_ps(
-                f"Set-DhcpServerv4OptionValue -ScopeId {scope_id} "
-                f"-Router {desired.gateway} "
+                f"Set-DhcpServerv4OptionValue -ScopeId {scope_literal} "
+                f"-Router {ps_ipv4(desired.gateway)} "
                 f"-DnsServer {dns_str} "
-                f'-DnsDomain "{_ps_str(desired.dnsDomain)}"',
+                f"-DnsDomain {ps_single_quote(desired.dnsDomain)}",
                 parse_json=False,
+                scope_id=scope_id,
+                operation="set_dns_options",
             )
 
         current_excl = {(e.startAddress, e.endAddress) for e in current.exclusions}
         desired_excl = {(e.startAddress, e.endAddress) for e in desired.exclusions}
 
         for start, end in current_excl - desired_excl:
-            logger.info("Scope %s: removing exclusion %s-%s", scope_id, start, end)
+            changed = True
+            logger.info(
+                "Removing DHCP exclusion range",
+                extra=_scope_extra(scope_id, "remove_exclusion"),
+            )
             await run_ps(
-                f"Remove-DhcpServerv4ExclusionRange -ScopeId {scope_id} "
-                f"-StartRange {start} -EndRange {end}",
+                f"Remove-DhcpServerv4ExclusionRange -ScopeId {scope_literal} "
+                f"-StartRange {ps_ipv4(start)} -EndRange {ps_ipv4(end)}",
                 parse_json=False,
+                scope_id=scope_id,
+                operation="remove_exclusion",
             )
 
         for start, end in desired_excl - current_excl:
-            logger.info("Scope %s: adding exclusion %s-%s", scope_id, start, end)
+            changed = True
+            logger.info(
+                "Adding DHCP exclusion range",
+                extra=_scope_extra(scope_id, "add_exclusion"),
+            )
             await run_ps(
-                f"Add-DhcpServerv4ExclusionRange -ScopeId {scope_id} "
-                f"-StartRange {start} -EndRange {end}",
+                f"Add-DhcpServerv4ExclusionRange -ScopeId {scope_literal} "
+                f"-StartRange {ps_ipv4(start)} -EndRange {ps_ipv4(end)}",
                 parse_json=False,
+                scope_id=scope_id,
+                operation="add_exclusion",
             )
 
-        await _handle_failover_diff(scope_id, current.failover, desired.failover)
+        failover_changed = await _handle_failover_diff(scope_id, current.failover, desired.failover)
+        changed = changed or failover_changed
+
+        if changed and desired.failover is not None:
+            await _replicate_failover(scope_id, desired.failover.relationshipName)
 
         return await _assemble_existing_scope(scope_id)
 
 
 @log_call
 async def delete_scope(scope_id: str) -> None:
+    scope_literal = ps_ipv4(scope_id)
+    logger.info("Deleting DHCP scope", extra=_scope_extra(scope_id, "delete_scope"))
     async with scope_locks.lock(scope_id):
         if not await scope_exists(scope_id):
-            logger.info("Scope %s does not exist — nothing to delete", scope_id)
+            logger.info(
+                "DHCP scope does not exist, delete is already converged",
+                extra=_scope_extra(scope_id, "delete_scope", status="not_found"),
+            )
             return
 
         current = await _try_assemble_scope(scope_id)
@@ -241,50 +317,91 @@ async def delete_scope(scope_id: str) -> None:
 
         for excl in current.exclusions:
             await _run_ps(
-                f"Remove-DhcpServerv4ExclusionRange -ScopeId {scope_id} "
-                f"-StartRange {excl.startAddress} -EndRange {excl.endAddress}",
+                f"Remove-DhcpServerv4ExclusionRange -ScopeId {scope_literal} "
+                f"-StartRange {ps_ipv4(excl.startAddress)} -EndRange {ps_ipv4(excl.endAddress)}",
                 warn_prefix=f"Failed to remove exclusion {excl.startAddress}",
+                scope_id=scope_id,
+                operation="remove_exclusion",
             )
 
-        await run_ps(f"Remove-DhcpServerv4Scope -ScopeId {scope_id} -Force", parse_json=False)
-        logger.info("Scope %s deleted", scope_id)
+        await run_ps(
+            f"Remove-DhcpServerv4Scope -ScopeId {scope_literal} -Force",
+            parse_json=False,
+            scope_id=scope_id,
+            operation="remove_scope",
+        )
+        logger.info("DHCP scope deleted", extra=_scope_extra(scope_id, "delete_scope", status="ok"))
 
 
 # ---------------------------------------------------------------------------
 # Failover helpers
 # ---------------------------------------------------------------------------
 
+async def _replicate_failover(scope_id: str, relationship_name: str | None = None) -> None:
+    await run_ps(
+        f"Invoke-DhcpServerv4FailoverReplication -ScopeId {ps_ipv4(scope_id)} -Force",
+        parse_json=False,
+        scope_id=scope_id,
+        operation="replicate_failover",
+        relationship_name=relationship_name,
+    )
+    logger.info(
+        "Failover replication completed",
+        extra=_scope_extra(
+            scope_id,
+            "replicate_failover",
+            relationship_name=relationship_name,
+            status="ok",
+        ),
+    )
+
+
 async def _remove_scope_from_failover(scope_id: str, rel_name: str) -> None:
     await run_ps(
-        f'Remove-DhcpServerv4FailoverScope -Name "{_ps_str(rel_name)}" '
-        f"-ScopeId {scope_id} -Force",
+        f"Remove-DhcpServerv4FailoverScope -Name {ps_single_quote(rel_name)} "
+        f"-ScopeId {ps_ipv4(scope_id)} -Force",
         parse_json=False,
+        scope_id=scope_id,
+        operation="remove_failover_scope",
+        relationship_name=rel_name,
     )
     rel_raw = await _run_ps(
-        f'Get-DhcpServerv4Failover -Name "{_ps_str(rel_name)}"',
+        f"Get-DhcpServerv4Failover -Name {ps_single_quote(rel_name)}",
         parse_json=True,
         best_effort=True,
+        scope_id=scope_id,
+        operation="get_failover",
+        relationship_name=rel_name,
     )
     if rel_raw:
         rel = rel_raw if isinstance(rel_raw, dict) else rel_raw[0]
         if not rel.get("ScopeId"):
             await run_ps(
-                f'Remove-DhcpServerv4Failover -Name "{_ps_str(rel_name)}" -Force',
+                f"Remove-DhcpServerv4Failover -Name {ps_single_quote(rel_name)} -Force",
                 parse_json=False,
+                scope_id=scope_id,
+                operation="remove_failover_relationship",
+                relationship_name=rel_name,
             )
 
 
 async def _setup_failover(scope_id: str, failover: DhcpFailover) -> None:
     existing = await _run_ps(
-        f'Get-DhcpServerv4Failover -Name "{_ps_str(failover.relationshipName)}"',
+        f"Get-DhcpServerv4Failover -Name {ps_single_quote(failover.relationshipName)}",
         parse_json=True,
         ignore_not_found=True,
+        scope_id=scope_id,
+        operation="get_failover",
+        relationship_name=failover.relationshipName,
     )
     if existing:
         await _run_ps(
-            f'Add-DhcpServerv4FailoverScope -Name "{_ps_str(failover.relationshipName)}" '
-            f"-ScopeId {scope_id}",
+            f"Add-DhcpServerv4FailoverScope -Name {ps_single_quote(failover.relationshipName)} "
+            f"-ScopeId {ps_ipv4(scope_id)}",
             ignore_already_exists=True,
+            scope_id=scope_id,
+            operation="add_failover_scope",
+            relationship_name=failover.relationshipName,
         )
     else:
         await _create_failover_relationship(scope_id, failover)
@@ -293,9 +410,9 @@ async def _setup_failover(scope_id: str, failover: DhcpFailover) -> None:
 async def _create_failover_relationship(scope_id: str, failover: DhcpFailover) -> None:
     cmd = (
         f'Add-DhcpServerv4Failover '
-        f'-Name "{_ps_str(failover.relationshipName)}" '
-        f'-PartnerServer "{_ps_str(failover.partnerServer)}" '
-        f'-ScopeId {scope_id} '
+        f'-Name {ps_single_quote(failover.relationshipName)} '
+        f'-PartnerServer {ps_single_quote(failover.partnerServer)} '
+        f'-ScopeId {ps_ipv4(scope_id)} '
         f'-Mode {failover.mode} '
         f'-MaxClientLeadTime (New-TimeSpan -Minutes {failover.maxClientLeadTimeMinutes}) '
         f'-Force'
@@ -307,37 +424,45 @@ async def _create_failover_relationship(scope_id: str, failover: DhcpFailover) -
         cmd += f" -LoadBalancePercent {failover.loadBalancePercent}"
 
     if failover.sharedSecret:
-        cmd += f' -SharedSecret "{_ps_str(failover.sharedSecret)}"'
+        cmd += f' -SharedSecret {ps_single_quote(failover.sharedSecret)}'
 
-    await run_ps(cmd, parse_json=False)
+    await run_ps(
+        cmd,
+        parse_json=False,
+        scope_id=scope_id,
+        operation="create_failover_relationship",
+        relationship_name=failover.relationshipName,
+    )
 
 
 async def _handle_failover_diff(
     scope_id: str,
     current: Optional[DhcpFailover],
     desired: Optional[DhcpFailover],
-) -> None:
+) -> bool:
     if current is None and desired is None:
-        return
+        return False
 
     if current is None:
         await _setup_failover(scope_id, desired)
-        await run_ps(f"Invoke-DhcpServerv4FailoverReplication -ScopeId {scope_id} -Force", parse_json=False)
-        return
+        return True
 
     if desired is None:
         await _remove_scope_from_failover(scope_id, current.relationshipName)
-        return
+        return True
 
     if current.mode != desired.mode:
         logger.info(
-            "Scope %s: failover mode changed %s→%s — removing '%s' and recreating",
-            scope_id, current.mode, desired.mode, current.relationshipName,
+            "Failover mode changed, recreating relationship",
+            extra=_scope_extra(
+                scope_id,
+                "recreate_failover",
+                relationship_name=current.relationshipName,
+            ),
         )
         await _remove_scope_from_failover(scope_id, current.relationshipName)
         await _setup_failover(scope_id, desired)
-        await run_ps(f"Invoke-DhcpServerv4FailoverReplication -ScopeId {scope_id} -Force", parse_json=False)
-        return
+        return True
 
     identity_changed = (
         current.relationshipName != desired.relationshipName
@@ -346,31 +471,41 @@ async def _handle_failover_diff(
     )
     if identity_changed:
         logger.info(
-            "Scope %s: failover identity changed — removing '%s' and recreating",
-            scope_id, current.relationshipName,
+            "Failover identity changed, recreating relationship",
+            extra=_scope_extra(
+                scope_id,
+                "recreate_failover",
+                relationship_name=current.relationshipName,
+            ),
         )
         await _remove_scope_from_failover(scope_id, current.relationshipName)
         await _setup_failover(scope_id, desired)
-        await run_ps(f"Invoke-DhcpServerv4FailoverReplication -ScopeId {scope_id} -Force", parse_json=False)
-        return
+        return True
 
     if current.mode == "HotStandby":
         mutable_changed = (
             current.reservePercent != desired.reservePercent
             or current.maxClientLeadTimeMinutes != desired.maxClientLeadTimeMinutes
-            or current.sharedSecret != desired.sharedSecret
+            or desired.sharedSecret is not None
         )
     else:
         mutable_changed = (
             current.loadBalancePercent != desired.loadBalancePercent
             or current.maxClientLeadTimeMinutes != desired.maxClientLeadTimeMinutes
-            or current.sharedSecret != desired.sharedSecret
+            or desired.sharedSecret is not None
         )
 
     if mutable_changed:
-        logger.info("Scope %s: updating failover params", scope_id)
+        logger.info(
+            "Updating failover parameters",
+            extra=_scope_extra(
+                scope_id,
+                "set_failover_params",
+                relationship_name=current.relationshipName,
+            ),
+        )
         cmd = (
-            f'Set-DhcpServerv4Failover -Name "{_ps_str(current.relationshipName)}" '
+            f"Set-DhcpServerv4Failover -Name {ps_single_quote(current.relationshipName)} "
             f"-MaxClientLeadTime (New-TimeSpan -Minutes {desired.maxClientLeadTimeMinutes})"
         )
         if desired.mode == "HotStandby":
@@ -378,8 +513,14 @@ async def _handle_failover_diff(
         else:
             cmd += f" -LoadBalancePercent {desired.loadBalancePercent}"
         if desired.sharedSecret is not None:
-            cmd += f' -SharedSecret "{_ps_str(desired.sharedSecret)}"'
-        elif current.sharedSecret is not None:
-            cmd += ' -SharedSecret ""'
-        await run_ps(cmd, parse_json=False)
-        await run_ps(f"Invoke-DhcpServerv4FailoverReplication -ScopeId {scope_id} -Force", parse_json=False)
+            cmd += f" -SharedSecret {ps_single_quote(desired.sharedSecret)}"
+        await run_ps(
+            cmd,
+            parse_json=False,
+            scope_id=scope_id,
+            operation="set_failover_params",
+            relationship_name=current.relationshipName,
+        )
+        return True
+
+    return False

@@ -50,7 +50,10 @@ dhcp_values:
     serverRole: "Active" # Active on this server, Standby on partner
     reservePercent: 5 # % of IPs reserved for standby server
     maxClientLeadTimeMinutes: 60
-    sharedSecret: null
+    # sharedSecret is intentionally not rendered into the Crossplane comparison body.
+    # The backend accepts it as write-only API input, but Windows does not return it
+    # from Get-DhcpServerv4Failover, so including it in observed desired state would
+    # either expose a secret or cause a reconciliation loop.
 
   # failover:
   # partnerServer: "dhcp02.lab.local"
@@ -58,4 +61,3 @@ dhcp_values:
   # mode: "LoadBalance"
   # loadBalancePercent: 50      # % handled by THIS server
   # maxClientLeadTimeMinutes: 60
-  # sharedSecret: null

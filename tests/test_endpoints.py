@@ -85,6 +85,28 @@ async def test_get_missing_scope():
     assert "10.20.30.0" in err["message"]
 
 
+async def test_get_failover_response_does_not_include_shared_secret():
+    from app.models import DhcpFailover
+
+    scope = _make_scope(
+        failover=DhcpFailover(
+            partnerServer="dhcp02.lab.local",
+            relationshipName="rel1",
+            mode="HotStandby",
+            serverRole="Active",
+            reservePercent=5,
+            maxClientLeadTimeMinutes=60,
+            sharedSecret="TOP-SECRET",
+        )
+    )
+    with patch("app.services.scope_service.assemble_scope_state", return_value=scope):
+        r = await client.get("/api/v1/scopes/10.20.30.0")
+
+    assert r.status_code == 200
+    assert "sharedSecret" not in r.text
+    assert "TOP-SECRET" not in r.text
+
+
 # ---------------------------------------------------------------------------
 # POST
 # ---------------------------------------------------------------------------
@@ -186,6 +208,28 @@ async def test_post_by_scope_id_with_hotstandby_failover():
     assert called_payload.failover is not None
     assert called_payload.failover.mode == "HotStandby"
     assert called_payload.failover.serverRole == "Active"
+
+
+async def test_post_accepts_shared_secret_but_response_excludes_it():
+    failover_dict = {
+        "partnerServer": "dhcp02.lab.local",
+        "relationshipName": "rel1",
+        "mode": "HotStandby",
+        "serverRole": "Active",
+        "reservePercent": 5,
+        "maxClientLeadTimeMinutes": 60,
+        "sharedSecret": "TOP-SECRET",
+    }
+    body = _make_scope_dict(failover=failover_dict)
+    created = _make_scope(failover=DhcpScopePayload(**body).failover)
+    with patch("app.services.scope_service.create_scope", return_value=created) as mock_create:
+        r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
+
+    assert r.status_code == 200
+    called_payload = mock_create.call_args[0][0]
+    assert called_payload.failover.sharedSecret == "TOP-SECRET"
+    assert "sharedSecret" not in r.text
+    assert "TOP-SECRET" not in r.text
 
 
 async def test_post_by_scope_id_with_loadbalance_failover():
@@ -348,6 +392,34 @@ async def test_powershell_already_exists_unhandled_returns_409():
     assert _error(r.json())["code"] == "DHCP_CONFLICT"
 
 
+async def test_failover_replication_failure_returns_500():
+    from app.models import DhcpFailover
+
+    failover = DhcpFailover(
+        partnerServer="dhcp02.lab.local",
+        relationshipName="rel1",
+        mode="HotStandby",
+        serverRole="Active",
+        reservePercent=5,
+        maxClientLeadTimeMinutes=60,
+    )
+    current = _make_scope(dnsServers=["10.0.0.53"], failover=failover)
+    desired = _make_scope(dnsServers=["10.0.0.53", "10.0.0.54"], failover=failover)
+    body = desired.model_dump(mode="json")
+
+    with patch("app.services.scope_service.assemble_scope_state") as mock_assemble, \
+         patch("app.services.scope_service.run_ps") as mock_ps:
+        mock_assemble.side_effect = [current, desired]
+        mock_ps.side_effect = [
+            None,
+            PowerShellError("Invoke-DhcpServerv4FailoverReplication", "replication failed", 1),
+        ]
+        r = await client.put("/api/v1/scopes/10.20.30.0", json=body)
+
+    assert r.status_code == 500
+    assert _error(r.json())["code"] == "POWERSHELL_COMMAND_FAILED"
+
+
 async def test_unexpected_exception_returns_standard_500():
     with patch("app.services.scope_service.list_scopes", side_effect=TypeError("boom")):
         r = await client.get("/api/v1/scopes")
@@ -463,6 +535,24 @@ async def test_invalid_request_body_returns_standard_validation_error():
     assert any(e["field"] == "body.startRange" for e in err["details"]["errors"])
 
 
+async def test_post_empty_dns_servers_returns_422():
+    body = _make_scope_dict(dnsServers=[])
+    r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
+    assert r.status_code == 422
+    err = _error(r.json())
+    assert err["code"] == "VALIDATION_ERROR"
+    assert any(e["field"] == "body.dnsServers" for e in err["details"]["errors"])
+
+
+async def test_put_empty_dns_servers_returns_422():
+    body = _make_scope_dict(dnsServers=[])
+    r = await client.put("/api/v1/scopes/10.20.30.0", json=body)
+    assert r.status_code == 422
+    err = _error(r.json())
+    assert err["code"] == "VALIDATION_ERROR"
+    assert any(e["field"] == "body.dnsServers" for e in err["details"]["errors"])
+
+
 async def test_invalid_subnet_relationship_returns_validation_error():
     body = _make_scope_dict(startRange="10.20.31.100", endRange="10.20.31.200")
     r = await client.post("/api/v1/scopes/10.20.30.0", json=body)
@@ -504,13 +594,13 @@ async def test_list_scopes_multiple():
     scope_a = DhcpScopePayload(
         scopeName="Scope-A", network="10.20.30.0", subnetMask="255.255.255.0",
         startRange="10.20.30.100", endRange="10.20.30.200", leaseDurationDays=8,
-        description="", gateway="10.20.30.1", dnsServers=[], dnsDomain="",
+        description="", gateway="10.20.30.1", dnsServers=["10.0.0.53"], dnsDomain="",
         exclusions=[], failover=None,
     )
     scope_b = DhcpScopePayload(
         scopeName="Scope-B", network="10.20.31.0", subnetMask="255.255.255.0",
         startRange="10.20.31.100", endRange="10.20.31.200", leaseDurationDays=8,
-        description="", gateway="10.20.31.1", dnsServers=[], dnsDomain="",
+        description="", gateway="10.20.31.1", dnsServers=["10.0.0.53"], dnsDomain="",
         exclusions=[], failover=None,
     )
     with patch("app.services.scope_service.list_scopes", return_value=[scope_a, scope_b]):
@@ -539,13 +629,13 @@ async def test_list_scopes_sorted_numerically():
     scope_30 = DhcpScopePayload(
         scopeName="Scope-30", network="10.20.30.0", subnetMask="255.255.255.0",
         startRange="10.20.30.100", endRange="10.20.30.200", leaseDurationDays=8,
-        description="", gateway="10.20.30.1", dnsServers=[], dnsDomain="",
+        description="", gateway="10.20.30.1", dnsServers=["10.0.0.53"], dnsDomain="",
         exclusions=[], failover=None,
     )
     scope_9 = DhcpScopePayload(
         scopeName="Scope-9", network="10.20.9.0", subnetMask="255.255.255.0",
         startRange="10.20.9.100", endRange="10.20.9.200", leaseDurationDays=8,
-        description="", gateway="10.20.9.1", dnsServers=[], dnsDomain="",
+        description="", gateway="10.20.9.1", dnsServers=["10.0.0.53"], dnsDomain="",
         exclusions=[], failover=None,
     )
     # "10.20.9.0" < "10.20.30.0" numerically but "10.20.30.0" < "10.20.9.0" lexicographically.

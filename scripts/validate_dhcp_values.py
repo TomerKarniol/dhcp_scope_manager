@@ -6,7 +6,7 @@ Add this file to your CI pipeline alongside scripts/requirements.txt.
 
 Usage:
     # Single values file
-    python scripts/validate_dhcp_values.py helm/hosted-cluster-integration/values.yaml
+    python scripts/validate_dhcp_values.py helm/values.yaml
 
     # Layered values (site defaults + cluster override, same precedence as helm -f)
     python scripts/validate_dhcp_values.py site/defaults.yaml clusters/cluster-a.yaml
@@ -26,7 +26,7 @@ validate-dhcp-values:
   before_script:
     - pip install --quiet -r scripts/requirements.txt
   script:
-    - python scripts/validate_chagned_clusters.py
+    - python scripts/validate_changed_clusters.py
   rules:
     - changes:
         - sites/**/*.yaml
@@ -74,7 +74,7 @@ class DhcpFailover(BaseModel):
     reservePercent: int = Field(default=0, ge=0, le=100)
     loadBalancePercent: Optional[int] = Field(default=None, ge=0, le=100)
     maxClientLeadTimeMinutes: int = Field(ge=1, le=1440)
-    sharedSecret: Optional[str] = Field(default=None, max_length=256)
+    sharedSecret: Optional[str] = Field(default=None, max_length=256, exclude=True)
 
     @field_validator("sharedSecret", mode="before")
     @classmethod
@@ -121,7 +121,7 @@ class DhcpScopePayload(BaseModel):
             return ""
         return v
     gateway: IPv4Address
-    dnsServers: list[IPv4Address] = Field(default_factory=list)
+    dnsServers: list[IPv4Address] = Field(default_factory=list, min_length=1)
     dnsDomain: str = Field(default="", max_length=256)
     exclusions: list[DhcpExclusion] = Field(default_factory=list)
     failover: Optional[DhcpFailover] = None

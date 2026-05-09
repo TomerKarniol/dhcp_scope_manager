@@ -84,12 +84,34 @@ async def test_dns_changed():
     assert any("Set-DhcpServerv4OptionValue" in cmd for cmd in ps_commands)
 
 
+async def test_dns_changed_with_failover_triggers_replication():
+    failover = _make_failover()
+    current = _make_scope(dnsServers=["10.0.0.53"], failover=failover)
+    desired = _make_scope(dnsServers=["10.0.0.53", "10.0.0.54"], failover=_make_failover())
+    calls = await _run_update(current, desired)
+    ps_commands = [c.args[0] for c in calls]
+    assert any("Set-DhcpServerv4OptionValue" in cmd for cmd in ps_commands)
+    assert any("Invoke-DhcpServerv4FailoverReplication" in cmd for cmd in ps_commands)
+
+
 async def test_exclusion_added():
     current = _make_scope(exclusions=[])
     desired = _make_scope(exclusions=[DhcpExclusion(startAddress="10.20.30.1", endAddress="10.20.30.99")])
     calls = await _run_update(current, desired)
     ps_commands = [c.args[0] for c in calls]
     assert any("Add-DhcpServerv4ExclusionRange" in cmd for cmd in ps_commands)
+
+
+async def test_exclusion_changed_with_failover_triggers_replication():
+    current = _make_scope(exclusions=[], failover=_make_failover())
+    desired = _make_scope(
+        exclusions=[DhcpExclusion(startAddress="10.20.30.1", endAddress="10.20.30.99")],
+        failover=_make_failover(),
+    )
+    calls = await _run_update(current, desired)
+    ps_commands = [c.args[0] for c in calls]
+    assert any("Add-DhcpServerv4ExclusionRange" in cmd for cmd in ps_commands)
+    assert any("Invoke-DhcpServerv4FailoverReplication" in cmd for cmd in ps_commands)
 
 
 async def test_exclusion_removed():
@@ -135,6 +157,15 @@ async def test_failover_add_new_relationship():
 
     ps_commands = [c.args[0] for c in mock_ps.call_args_list if c.args]
     assert any("Add-DhcpServerv4Failover" in cmd for cmd in ps_commands)
+    assert any("Invoke-DhcpServerv4FailoverReplication" in cmd for cmd in ps_commands)
+
+
+async def test_lease_changed_with_failover_triggers_replication():
+    current = _make_scope(leaseDurationDays=8, failover=_make_failover())
+    desired = _make_scope(leaseDurationDays=14, failover=_make_failover())
+    calls = await _run_update(current, desired)
+    ps_commands = [c.args[0] for c in calls]
+    assert any("Set-DhcpServerv4Scope" in cmd for cmd in ps_commands)
     assert any("Invoke-DhcpServerv4FailoverReplication" in cmd for cmd in ps_commands)
 
 

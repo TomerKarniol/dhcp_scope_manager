@@ -1,13 +1,14 @@
 """Security-focused tests.
 
 Covers:
-- PowerShell string escaping (_ps_str, ps_single_quote)
+- PowerShell string escaping (ps_single_quote)
 - scope_id injection prevention
 - API response sanitization: no Windows paths, no raw stderr, no stack traces
 - Secret values not in log output or exception messages
 - Exception handler helper unit tests (_sanitize_text, _is_already_exists_error)
 """
 import logging
+import json
 import pytest
 from unittest.mock import AsyncMock, patch
 from httpx import ASGITransport, AsyncClient
@@ -15,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.errors import InvalidScopeIdError
 from app.exception_handlers import _sanitize_text, _is_already_exists_error
+from app.logging_config import _SafeJsonFormatter
 from app.services.ps_executor import PowerShellError, PowerShellTimeoutError
 from app.services.ps_parsers import build_get_scope_state_script, ps_single_quote
 
@@ -34,63 +36,6 @@ async def _post(json_body):
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         return await client.post("/api/v1/scopes/10.20.30.0", json=json_body)
-
-
-# ─── _ps_str escaping ─────────────────────────────────────────────────────────
-
-class TestPsStrEscaping:
-    """_ps_str must neutralise all PowerShell metacharacters in double-quoted strings."""
-
-    def _ps_str(self, v):
-        from app.services.scope_service import _ps_str
-        return _ps_str(v)
-
-    def test_escapes_backtick(self):
-        assert self._ps_str("a`b") == "a``b"
-
-    def test_escapes_dollar_sign(self):
-        assert self._ps_str("$VAR") == "`$VAR"
-
-    def test_escapes_double_quote(self):
-        assert self._ps_str('say "hi"') == 'say `"hi`"'
-
-    def test_escapes_combined(self):
-        raw = '`$x"'
-        escaped = self._ps_str(raw)
-        assert "``" in escaped
-        assert "`$" in escaped
-        assert '`"' in escaped
-
-    def test_plain_text_unchanged(self):
-        assert self._ps_str("cluster-a-workers") == "cluster-a-workers"
-
-    def test_empty_string_unchanged(self):
-        assert self._ps_str("") == ""
-
-    def test_dollar_paren_injection_neutralized(self):
-        """$(Remove-DhcpServerv4Scope -Force) cannot execute when dollar is escaped.
-
-        _ps_str escapes $ → `$ so the sequence becomes `$(...)  — a literal dollar sign
-        in PowerShell, not a subexpression. The `$(` substring still appears in the
-        escaped string, but it cannot be executed because the dollar is backtick-escaped.
-        """
-        malicious = "$(Remove-DhcpServerv4Scope -Force)"
-        escaped = self._ps_str(malicious)
-        assert "`$" in escaped  # dollar was escaped — subexpression cannot execute
-
-    def test_backtick_newline_injection_neutralized(self):
-        """`n injection creates a PowerShell newline; backtick must be doubled first."""
-        malicious = "`nRemove-Item C:\\ -Recurse"
-        escaped = self._ps_str(malicious)
-        assert "``" in escaped  # backtick doubled — cannot be interpreted as escape
-
-    def test_scope_name_injected_into_add_command_is_safe(self):
-        """Verify the Add-DhcpServerv4Scope command template uses _ps_str correctly."""
-        from app.services.scope_service import _ps_str
-        name = 'scope"; Remove-DhcpServerv4Scope -Force; echo "'
-        escaped = _ps_str(name)
-        # Embedded double-quote escaped → cannot terminate the outer double-quoted string
-        assert "`\"" in escaped
 
 
 # ─── ps_single_quote escaping ─────────────────────────────────────────────────
@@ -336,3 +281,49 @@ class TestApiResponseSanitization:
             await scope_service.update_scope("10.20.30.0", desired)
 
         assert "TOP-SECRET-VALUE" not in caplog.text
+
+
+# ─── PowerShellError safe string / JSON logging ──────────────────────────────
+
+class TestPowerShellErrorSafety:
+
+    def test_powershell_error_str_redacts_secret_and_windows_path(self):
+        err = PowerShellError(
+            "Set-DhcpServerv4Failover -SharedSecret 'TOP-SECRET'",
+            "Failure in C:\\Windows\\System32\\dhcp.dll -SharedSecret 'TOP-SECRET'",
+            1,
+            operation="set_failover_params",
+            scope_id="10.20.30.0",
+        )
+        text = str(err)
+        assert "TOP-SECRET" not in text
+        assert "C:\\" not in text
+        assert "***REDACTED***" in text
+        assert "<path>" in text
+
+    def test_json_formatter_includes_safe_extra_fields(self):
+        formatter = _SafeJsonFormatter()
+        record = logging.LogRecord(
+            "app.test", logging.INFO, __file__, 1, "message %s", ("ok",), None
+        )
+        record.scope_id = "10.20.30.0"
+        record.operation = "set_dns_options"
+        record.relationship_name = "rel1"
+        record.duration_ms = 12.5
+        record.status = "ok"
+        record.error_code = "POWERSHELL_COMMAND_FAILED"
+        rendered = formatter.format(record)
+        payload = json.loads(rendered)
+        assert payload["scope_id"] == "10.20.30.0"
+        assert payload["operation"] == "set_dns_options"
+        assert payload["relationship_name"] == "rel1"
+        assert payload["duration_ms"] == 12.5
+        assert payload["status"] == "ok"
+        assert payload["error_code"] == "POWERSHELL_COMMAND_FAILED"
+
+    def test_json_formatter_handles_absent_scope_id(self):
+        formatter = _SafeJsonFormatter()
+        record = logging.LogRecord("app.test", logging.INFO, __file__, 1, "hello", (), None)
+        payload = json.loads(formatter.format(record))
+        assert payload["msg"] == "hello"
+        assert "scope_id" not in payload

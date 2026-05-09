@@ -50,7 +50,6 @@ dhcp_values:
     serverRole: "Active"
     reservePercent: 5
     maxClientLeadTimeMinutes: 60
-    sharedSecret: null
 ```
 
 ---
@@ -68,7 +67,7 @@ dhcp_values:
 | `endRange`          | IPv4         | in subnet, not network/broadcast, >= startRange | Last IP in the DHCP distribution range                               |
 | `leaseDurationDays` | integer      | 1–3650                                          | Lease duration sent to clients                                       |
 | `gateway`           | IPv4         | in subnet, not network/broadcast                | Default gateway (DHCP option 3)                                      |
-| `dns.servers`       | list of IPv4 | at least one recommended                        | DNS servers sent to clients (DHCP option 6)                          |
+| `dns.servers`       | list of IPv4 | at least one required                           | DNS servers sent to clients (DHCP option 6)                          |
 | `dns.domain`        | string       | max 256 chars                                   | DNS search domain sent to clients (DHCP option 15)                   |
 
 ### Optional fields
@@ -112,6 +111,8 @@ dns:
 ```
 
 If the order in `values.yaml` does not match what the DHCP server has stored, Crossplane will issue a PUT every 60 seconds. Keep the order consistent.
+
+At least one DNS server is required by the backend model. `dns.servers: []` is rejected with `422 VALIDATION_ERROR`, and a live DHCP scope observed with no DNS option is treated as invalid managed state.
 
 ---
 
@@ -157,7 +158,6 @@ failover:
   serverRole: "Active" # role of THIS server: "Active" or "Standby"
   reservePercent: 5 # % of IPs reserved for the standby server (0–100)
   maxClientLeadTimeMinutes: 60
-  sharedSecret: null # or a string for authenticated failover
 ```
 
 `serverRole` is required for HotStandby. `loadBalancePercent` is not used and can be omitted.
@@ -173,23 +173,23 @@ failover:
   mode: "LoadBalance"
   loadBalancePercent: 50 # % of requests handled by THIS server (0–100)
   maxClientLeadTimeMinutes: 60
-  sharedSecret: null
 ```
 
 `loadBalancePercent` is required for LoadBalance. `serverRole` and `reservePercent` are not used and can be omitted.
 
 ### Failover field reference
 
-| Field                      | Type           | Required for | Constraints                       | Description                                                                             |
-| -------------------------- | -------------- | ------------ | --------------------------------- | --------------------------------------------------------------------------------------- |
-| `partnerServer`            | string         | both modes   | 1–255 chars                       | FQDN of the partner DHCP server                                                         |
-| `relationshipName`         | string         | both modes   | 1–64 chars                        | Unique name for this failover relationship on the DHCP server                           |
-| `mode`                     | string         | both modes   | `"HotStandby"` or `"LoadBalance"` | Failover mode                                                                           |
-| `serverRole`               | string         | HotStandby   | `"Active"` or `"Standby"`         | Role of THIS server in HotStandby mode                                                  |
-| `reservePercent`           | integer        | —            | 0–100, default 0                  | % of IPs reserved for standby (HotStandby only)                                         |
-| `loadBalancePercent`       | integer        | LoadBalance  | 0–100                             | % of requests handled by THIS server (LoadBalance only)                                 |
-| `maxClientLeadTimeMinutes` | integer        | both modes   | 1–1440                            | Max client lead time in minutes (up to 24 hours)                                        |
-| `sharedSecret`             | string or null | —            | max 256 chars                     | Shared secret for failover authentication. `""` and `null` both mean no authentication. |
+| Field                      | Type    | Required for | Constraints                       | Description                                                   |
+| -------------------------- | ------- | ------------ | --------------------------------- | ------------------------------------------------------------- |
+| `partnerServer`            | string  | both modes   | 1–255 chars                       | FQDN of the partner DHCP server                               |
+| `relationshipName`         | string  | both modes   | 1–64 chars                        | Unique name for this failover relationship on the DHCP server |
+| `mode`                     | string  | both modes   | `"HotStandby"` or `"LoadBalance"` | Failover mode                                                 |
+| `serverRole`               | string  | HotStandby   | `"Active"` or `"Standby"`         | Role of THIS server in HotStandby mode                        |
+| `reservePercent`           | integer | —            | 0–100, default 0                  | % of IPs reserved for standby (HotStandby only)               |
+| `loadBalancePercent`       | integer | LoadBalance  | 0–100                             | % of requests handled by THIS server (LoadBalance only)       |
+| `maxClientLeadTimeMinutes` | integer | both modes   | 1–1440                            | Max client lead time in minutes (up to 24 hours)              |
+
+`sharedSecret` is intentionally not part of the Helm-rendered comparison body. The backend API accepts it as write-only direct POST/PUT input, but Windows DHCP does not return the plaintext value from `Get-DhcpServerv4Failover`, so including it in the observed desired state would either expose a secret or cause Crossplane drift.
 
 ### Changing failover
 
@@ -200,7 +200,7 @@ Certain changes require the failover relationship to be removed and recreated:
 - Changing `partnerServer`
 - Changing `serverRole` (HotStandby only)
 
-Other changes (`reservePercent`, `loadBalancePercent`, `maxClientLeadTimeMinutes`, `sharedSecret`) update in-place with `Set-DhcpServerv4Failover`.
+Other changes (`reservePercent`, `loadBalancePercent`, `maxClientLeadTimeMinutes`) update in-place with `Set-DhcpServerv4Failover`.
 
 ### Removing failover
 

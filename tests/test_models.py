@@ -1,4 +1,6 @@
 import json
+import pytest
+from pydantic import ValidationError
 from app.models import DhcpExclusion, DhcpFailover, DhcpScopePayload
 
 
@@ -17,7 +19,7 @@ def test_empty_exclusions_not_null():
     payload = DhcpScopePayload(
         scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
         startRange="10.0.0.1", endRange="10.0.0.254", leaseDurationDays=8,
-        description="", gateway="10.0.0.1", dnsServers=[], dnsDomain="",
+        description="", gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain="",
         exclusions=[], failover=None,
     )
     data = payload.model_dump(mode="json")
@@ -45,6 +47,37 @@ def test_lease_duration_is_int(sample_scope_payload):
 
 def test_failover_shared_secret_null(sample_failover):
     data = sample_failover.model_dump(mode="json")
-    assert data["sharedSecret"] is None
+    assert "sharedSecret" not in data
     serialized = json.dumps(data)
-    assert '"sharedSecret": null' in serialized
+    assert "sharedSecret" not in serialized
+
+
+def test_dns_servers_empty_rejected():
+    with pytest.raises(ValidationError):
+        DhcpScopePayload(
+            scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
+            startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+            description="", gateway="10.0.0.1", dnsServers=[], dnsDomain="",
+            exclusions=[], failover=None,
+        )
+
+
+def test_dns_servers_single_server_accepted():
+    payload = DhcpScopePayload(
+        scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
+        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        description="", gateway="10.0.0.1", dnsServers=["10.0.0.53"], dnsDomain="",
+        exclusions=[], failover=None,
+    )
+    assert [str(ip) for ip in payload.dnsServers] == ["10.0.0.53"]
+
+
+def test_dns_servers_multiple_servers_accepted():
+    payload = DhcpScopePayload(
+        scopeName="Test", network="10.0.0.0", subnetMask="255.255.255.0",
+        startRange="10.0.0.1", endRange="10.0.0.10", leaseDurationDays=8,
+        description="", gateway="10.0.0.1",
+        dnsServers=["10.0.0.53", "10.0.0.54"], dnsDomain="",
+        exclusions=[], failover=None,
+    )
+    assert [str(ip) for ip in payload.dnsServers] == ["10.0.0.53", "10.0.0.54"]

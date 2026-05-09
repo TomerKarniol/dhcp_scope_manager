@@ -4,6 +4,7 @@ test_diff.py covers update_scope exhaustively; this file covers the remaining
 service functions and the specific PS command sequences they issue.
 """
 import pytest
+import logging
 from unittest.mock import patch
 
 from app.errors import ScopeNotFoundError
@@ -202,6 +203,88 @@ class TestCreateScope:
         assert "10.0.0.53" in opts_cmd
         assert "10.0.0.54" in opts_cmd
 
+    async def test_add_scope_already_exists_race_converges(self):
+        """If another writer creates the scope between exists-check and Add, continue."""
+        payload = _make_scope()
+        result = _make_scope()
+
+        with patch("app.services.scope_service.run_ps") as mock_ps, \
+             patch("app.services.scope_service.assemble_scope_state", return_value=result):
+            mock_ps.side_effect = [
+                PowerShellError("Get-DhcpServerv4Scope", "No DHCP scope found", 1),
+                PowerShellError("Add-DhcpServerv4Scope", "scope already exists", 1),
+                None,
+            ]
+            from app.services import scope_service
+            out = await scope_service.create_scope(payload)
+
+        assert out is result
+        commands = [c.args[0] for c in mock_ps.call_args_list if c.args]
+        assert any("Add-DhcpServerv4Scope" in cmd for cmd in commands)
+        assert any("Set-DhcpServerv4OptionValue" in cmd for cmd in commands)
+
+    async def test_add_scope_unrelated_error_still_fails(self):
+        payload = _make_scope()
+
+        with patch("app.services.scope_service.run_ps") as mock_ps, \
+             patch("app.services.scope_service.assemble_scope_state"):
+            mock_ps.side_effect = [
+                PowerShellError("Get-DhcpServerv4Scope", "No DHCP scope found", 1),
+                PowerShellError("Add-DhcpServerv4Scope", "Access denied", 5),
+            ]
+            from app.services import scope_service
+            with pytest.raises(PowerShellError):
+                await scope_service.create_scope(payload)
+
+    async def test_create_scope_logs_scope_id(self, caplog):
+        payload = _make_scope()
+        result = _make_scope()
+
+        with patch("app.services.scope_service.run_ps") as mock_ps, \
+             patch("app.services.scope_service.assemble_scope_state", return_value=result), \
+             caplog.at_level(logging.INFO):
+            mock_ps.side_effect = [None, None, None]
+            from app.services import scope_service
+            await scope_service.create_scope(payload)
+
+        assert any(getattr(record, "scope_id", None) == "10.20.30.0" for record in caplog.records)
+
+    async def test_create_scope_escapes_scope_name_and_description(self):
+        payload = _make_scope(
+            scopeName="O'Brien $(Remove-DhcpServerv4Scope)",
+            description="desc with ' quote and $dollar and `backtick",
+        )
+        result = _make_scope()
+
+        with patch("app.services.scope_service.run_ps") as mock_ps, \
+             patch("app.services.scope_service.assemble_scope_state", return_value=result):
+            mock_ps.side_effect = [None, None, None]
+            from app.services import scope_service
+            await scope_service.create_scope(payload)
+
+        add_cmd = next(
+            c.args[0] for c in mock_ps.call_args_list
+            if c.args and "Add-DhcpServerv4Scope" in c.args[0]
+        )
+        assert "-Name 'O''Brien $(Remove-DhcpServerv4Scope)'" in add_cmd
+        assert "-Description 'desc with '' quote and $dollar and `backtick'" in add_cmd
+
+    async def test_create_scope_escapes_dns_domain(self):
+        payload = _make_scope(dnsDomain="lab.local'; Remove-DhcpServerv4Scope")
+        result = _make_scope()
+
+        with patch("app.services.scope_service.run_ps") as mock_ps, \
+             patch("app.services.scope_service.assemble_scope_state", return_value=result):
+            mock_ps.side_effect = [None, None, None]
+            from app.services import scope_service
+            await scope_service.create_scope(payload)
+
+        option_cmd = next(
+            c.args[0] for c in mock_ps.call_args_list
+            if c.args and "Set-DhcpServerv4OptionValue" in c.args[0]
+        )
+        assert "-DnsDomain 'lab.local''; Remove-DhcpServerv4Scope'" in option_cmd
+
 
 # ─── get_scope ────────────────────────────────────────────────────────────────
 
@@ -234,6 +317,25 @@ class TestGetScope:
             from app.services import scope_service
             with pytest.raises(PowerShellError):
                 await scope_service.get_scope("10.20.30.0")
+
+
+# ─── failover command construction ───────────────────────────────────────────
+
+class TestFailoverCommandConstruction:
+
+    async def test_relationship_name_and_shared_secret_are_single_quoted(self):
+        failover = _make_failover(
+            relationshipName="rel'$(evil)",
+            sharedSecret="sec'ret$`value",
+        )
+
+        with patch("app.services.scope_service.run_ps") as mock_ps:
+            from app.services.scope_service import _create_failover_relationship
+            await _create_failover_relationship("10.20.30.0", failover)
+
+        cmd = mock_ps.call_args.args[0]
+        assert "-Name 'rel''$(evil)'" in cmd
+        assert "-SharedSecret 'sec''ret$`value'" in cmd
 
 
 # ─── delete_scope ─────────────────────────────────────────────────────────────

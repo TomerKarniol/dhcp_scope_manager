@@ -28,7 +28,6 @@ failover:
   reservePercent: {{ if eq $f.mode "LoadBalance" }}0{{ else }}{{ $f.reservePercent | default 0 | int }}{{ end }}
   loadBalancePercent: {{ if eq $f.mode "HotStandby" }}0{{ else }}{{ $f.loadBalancePercent | int }}{{ end }}
   maxClientLeadTimeMinutes: {{ $f.maxClientLeadTimeMinutes | int }}
-  sharedSecret: {{ if $f.sharedSecret }}{{ $f.sharedSecret | quote }}{{ else }}null{{ end }}
 {{- else }}
 failover: null
 {{- end }}

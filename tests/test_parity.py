@@ -179,7 +179,10 @@ class TestScalarFieldParity:
         assert got["dnsDomain"] == "lab.local"
 
     def test_dns_domain_empty(self):
-        opts = [{"OptionId": 3, "Value": ["10.20.30.1"]}]  # no option 15
+        opts = [
+            {"OptionId": 3, "Value": ["10.20.30.1"]},
+            {"OptionId": 6, "Value": ["10.50.1.5"]},
+        ]  # no option 15
         got = _assemble(_ps_scope(), _ps_options(options=opts), [])
         assert got["dnsDomain"] == ""
 
@@ -312,14 +315,16 @@ class TestFailoverParity:
         assert got["failover"] is None
 
     def test_failover_all_fields_present(self):
-        """All 8 failover fields must always be present.
-        If sharedSecret is missing from the JSON, Crossplane will see a mismatch
-        against the Helm-rendered body which includes 'sharedSecret: null'."""
+        """All observed failover fields must be present.
+
+        sharedSecret is deliberately excluded because Windows exposes only
+        EnableAuth, not the plaintext secret.
+        """
         got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(), failover_raw=_ps_failover())
         f = got["failover"]
         required_fields = {
             "partnerServer", "relationshipName", "mode", "serverRole",
-            "reservePercent", "loadBalancePercent", "maxClientLeadTimeMinutes", "sharedSecret",
+            "reservePercent", "loadBalancePercent", "maxClientLeadTimeMinutes",
         }
         assert required_fields == set(f.keys()), (
             f"Missing failover fields: {required_fields - set(f.keys())}"
@@ -380,29 +385,23 @@ class TestFailoverParity:
                         failover_raw=_ps_failover(MaxClientLeadTime="1.00:00:00"))
         assert got["failover"]["maxClientLeadTimeMinutes"] == 1440
 
-    def test_failover_shared_secret_null_when_not_set(self):
-        """sharedSecret must be null (not absent) when not configured.
-        If the field is absent, Crossplane will see a mismatch against
-        the Helm template which always renders 'sharedSecret: null'."""
+    def test_failover_shared_secret_absent_when_not_set(self):
+        """sharedSecret is write-only and must not appear in observed state."""
         got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(),
                         failover_raw=_ps_failover(SharedSecret=None))
-        assert "sharedSecret" in got["failover"], (
-            "sharedSecret key must be present even when null — "
-            "absence causes Crossplane to detect a mismatch"
-        )
-        assert got["failover"]["sharedSecret"] is None
+        assert "sharedSecret" not in got["failover"]
 
-    def test_failover_shared_secret_empty_string_normalizes_to_null(self):
-        """PS returning empty string for sharedSecret must normalize to null.
-        Empty string != null in JSON, and Crossplane stores null in desired state."""
+    def test_failover_shared_secret_empty_string_not_returned(self):
+        """PS returning any SharedSecret value must not expose it."""
         got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(),
                         failover_raw=_ps_failover(SharedSecret=""))
-        assert got["failover"]["sharedSecret"] is None
+        assert "sharedSecret" not in got["failover"]
 
-    def test_failover_shared_secret_present(self):
+    def test_failover_shared_secret_present_not_returned(self):
         got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(),
                         failover_raw=_ps_failover(SharedSecret="mysecret"))
-        assert got["failover"]["sharedSecret"] == "mysecret"
+        assert "sharedSecret" not in got["failover"]
+        assert "mysecret" not in json.dumps(got)
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +430,6 @@ class TestFullPayloadParity:
             "reservePercent": 5,
             "loadBalancePercent": 0,  # HotStandby: always 0 (Helm renders 0, GET normalizes to 0)
             "maxClientLeadTimeMinutes": 60,
-            "sharedSecret": None,
         })
         got = _assemble(_ps_scope(), _ps_options(), _ps_exclusions(), failover_raw=_ps_failover())
         assert got == desired, (
@@ -455,7 +453,6 @@ class TestFullPayloadParity:
             "reservePercent": 0,          # normalised for LoadBalance
             "loadBalancePercent": 50,
             "maxClientLeadTimeMinutes": 60,
-            "sharedSecret": None,
         })
         ps_fo = _ps_failover(
             Mode="LoadBalance",

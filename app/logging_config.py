@@ -3,6 +3,18 @@ import logging
 import logging.config
 
 
+_SAFE_EXTRA_FIELDS = (
+    "scope_id",
+    "operation",
+    "relationship_name",
+    "duration_ms",
+    "status",
+    "error_code",
+    "returncode",
+    "stderr_preview",
+)
+
+
 class _SafeJsonFormatter(logging.Formatter):
     """Produce valid JSON log lines regardless of message content.
 
@@ -13,16 +25,19 @@ class _SafeJsonFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        return json.dumps(
-            {
-                "time": self.formatTime(record),
-                "level": record.levelname,
-                "name": record.name,
-                "msg": record.getMessage(),
-            },
-            ensure_ascii=False,
-            default=str,
-        )
+        payload = {
+            "time": self.formatTime(record),
+            "level": record.levelname,
+            "name": record.name,
+            "msg": record.getMessage(),
+        }
+        for field in _SAFE_EXTRA_FIELDS:
+            if hasattr(record, field):
+                value = getattr(record, field)
+                if value is not None:
+                    payload[field] = value
+
+        return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 LOGGING_CONFIG = {

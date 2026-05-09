@@ -2,32 +2,73 @@ import json
 import logging
 import re
 import asyncio
+import time
 
 from app.config import settings
 from app.services import dhcp_service
 
 logger = logging.getLogger(__name__)
 
-# Matches -SharedSecret "..." (including empty string) for log redaction.
-_SECRET_RE = re.compile(r'(-SharedSecret\s+)"[^"]*"', re.IGNORECASE)
+# Matches -SharedSecret "..." or PowerShell single-quoted strings ('a''b').
+_SECRET_RE = re.compile(
+    r"(-SharedSecret\s+)(\"[^\"]*\"|'(?:[^']|'')*')",
+    re.IGNORECASE,
+)
 _WIN_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s,;]+")
+_MAX_STDERR_PREVIEW_LEN = 500
 
 
 def redact_powershell_command(command: str) -> str:
     """Remove sensitive parameter values from a command string before logging."""
-    return _SECRET_RE.sub(r'\1"***REDACTED***"', command)
+    return _SECRET_RE.sub(r"\1'***REDACTED***'", command)
+
+
+def sanitize_powershell_text(value: str, *, max_len: int = _MAX_STDERR_PREVIEW_LEN) -> str:
+    """Remove high-risk infrastructure details and secrets from log/client text."""
+    redacted = redact_powershell_command(value)
+    redacted = _WIN_PATH_RE.sub("<path>", redacted)
+    return redacted[:max_len]
 
 
 def _sanitize_stderr_for_log(stderr: str) -> str:
-    return _WIN_PATH_RE.sub("<path>", stderr)
+    return sanitize_powershell_text(stderr)
 
 
 class PowerShellError(Exception):
-    def __init__(self, command: str, stderr: str, returncode: int):
+    def __init__(
+        self,
+        command: str,
+        stderr: str,
+        returncode: int,
+        *,
+        operation: str | None = None,
+        scope_id: str | None = None,
+    ):
         self.command = command
         self.stderr = stderr
         self.returncode = returncode
-        super().__init__(f"PowerShell command failed (rc={returncode}): {stderr}")
+        self.operation = operation
+        self.scope_id = scope_id
+        super().__init__(self.safe_message)
+
+    @property
+    def safe_stderr_preview(self) -> str:
+        return sanitize_powershell_text(self.stderr)
+
+    @property
+    def safe_command_preview(self) -> str:
+        return redact_powershell_command(self.command)
+
+    @property
+    def safe_message(self) -> str:
+        operation = self.operation or "unknown"
+        return (
+            f"PowerShell command failed "
+            f"(operation={operation}, rc={self.returncode}): {self.safe_stderr_preview}"
+        )
+
+    def __str__(self) -> str:
+        return self.safe_message
 
 
 class PowerShellExecutionError(PowerShellError):
@@ -37,12 +78,21 @@ class PowerShellExecutionError(PowerShellError):
 class PowerShellTimeoutError(PowerShellError):
     """PowerShell process exceeded the configured timeout."""
 
-    def __init__(self, command: str, timeout_seconds: int):
+    def __init__(
+        self,
+        command: str,
+        timeout_seconds: int,
+        *,
+        operation: str | None = None,
+        scope_id: str | None = None,
+    ):
         self.timeout_seconds = timeout_seconds
         super().__init__(
             command,
             f"PowerShell command timed out after {timeout_seconds} seconds",
             -1,
+            operation=operation,
+            scope_id=scope_id,
         )
 
 
@@ -80,6 +130,9 @@ async def run_ps(
     *,
     append_error_action: bool = True,
     append_convert_to_json: bool = True,
+    scope_id: str | None = None,
+    operation: str | None = None,
+    relationship_name: str | None = None,
 ) -> dict | list | None:
     """Execute a PowerShell command and optionally parse JSON output.
 
@@ -107,9 +160,15 @@ async def run_ps(
     if parse_json and append_convert_to_json:
         full_cmd += " | ConvertTo-Json -Depth 5 -Compress"
 
-    logger.info("PS> %s", redact_powershell_command(command))
+    log_extra = {
+        "scope_id": scope_id,
+        "operation": operation or "powershell",
+        "relationship_name": relationship_name,
+    }
+    logger.info("Running DHCP PowerShell command", extra=log_extra)
 
     process: asyncio.subprocess.Process | None = None
+    t0 = time.monotonic()
     try:
         async with _get_powershell_semaphore():
             process = await asyncio.create_subprocess_exec(
@@ -132,20 +191,37 @@ async def run_ps(
         raise PowerShellTimeoutError(
             command,
             settings.POWERSHELL_COMMAND_TIMEOUT_SECONDS,
+            operation=operation,
+            scope_id=scope_id,
         ) from exc
 
     stdout = stdout_bytes.decode(errors="replace")
     stderr = stderr_bytes.decode(errors="replace")
+    duration_ms = round((time.monotonic() - t0) * 1000, 2)
 
     if process.returncode != 0:
         logger.error(
-            "PS FAILED (rc=%d): %s",
-            process.returncode,
-            _sanitize_stderr_for_log(stderr.strip()),
+            "DHCP PowerShell command failed",
+            extra={
+                **log_extra,
+                "duration_ms": duration_ms,
+                "status": "failed",
+                "returncode": process.returncode,
+                "stderr_preview": _sanitize_stderr_for_log(stderr.strip()),
+            },
         )
-        raise PowerShellExecutionError(command, stderr.strip(), process.returncode or 1)
+        raise PowerShellExecutionError(
+            command,
+            stderr.strip(),
+            process.returncode or 1,
+            operation=operation,
+            scope_id=scope_id,
+        )
 
-    logger.debug("PS OUT: %s", stdout.strip()[:500])
+    logger.debug(
+        "DHCP PowerShell command completed",
+        extra={**log_extra, "duration_ms": duration_ms, "status": "ok"},
+    )
 
     if not parse_json or not stdout.strip():
         return None
@@ -157,4 +233,6 @@ async def run_ps(
             command,
             f"PowerShell returned non-JSON output: {exc}. stdout={stdout.strip()[:200]!r}",
             0,
+            operation=operation,
+            scope_id=scope_id,
         ) from exc

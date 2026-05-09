@@ -70,8 +70,12 @@ class DhcpFailover(BaseModel):
     sharedSecret: Optional[str] = Field(
         default=None,
         max_length=256,
-        description="Shared secret for failover authentication. null = no authentication. "
-                    "Empty string is normalized to null.",
+        exclude=True,
+        description=(
+            "Write-only shared secret for failover authentication. "
+            "Accepted on create/update, never returned by GET/list responses. "
+            "Empty string is normalized to null."
+        ),
     )
 
     @field_validator("sharedSecret", mode="before")
