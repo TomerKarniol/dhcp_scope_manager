@@ -57,6 +57,27 @@ LOGGING_CONFIG = {
     "root": {"handlers": ["console"], "level": "INFO"},  # overridden by configure_logging(level)
 }
 
+# writing the logging into a file
+#     "handlers": {
+#         "console": {
+#             "class": "logging.StreamHandler",
+#             "formatter": "json",
+#         },
+#         "file": {
+#             "class": "logging.handlers.RotatingFileHandler",
+#             "filename": "logs/app.log",
+#             "maxBytes": 10_000_000,  # 10 MB per file
+#             "backupCount": 5,        # keep app.log.1 through app.log.5
+#             "formatter": "json",
+#             "encoding": "utf-8",
+#         },
+#     },
+#     "root": {
+#         "handlers": ["console", "file"],
+#         "level": "INFO",
+#     },
+# }
+
 
 def configure_logging(level: str = "INFO") -> None:
     logging.config.dictConfig({
