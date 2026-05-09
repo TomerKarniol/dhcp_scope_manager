@@ -5,7 +5,6 @@ Covers behavior not already tested in test_async_runtime.py:
 - whitespace-only stdout treated as empty
 - append_error_action / append_convert_to_json flag behaviour
 - Binary / non-UTF8 bytes decoded with errors='replace'
-- redact_powershell_command regex patterns
 - is_not_found_error keyword set
 """
 import pytest
@@ -13,7 +12,6 @@ from unittest.mock import AsyncMock, patch
 
 from app.services.ps_executor import (
     PowerShellExecutionError,
-    redact_powershell_command,
     is_not_found_error,
     run_ps,
 )
@@ -161,18 +159,6 @@ class TestByteDecoding:
                 await run_ps("Get-Something", parse_json=False)
         # Decoded with errors='replace' → replacement char present or text still a string
         assert isinstance(exc_info.value.stderr, str)
-
-
-# ─── command preview sanitization ─────────────────────────────────────────────
-
-class TestRedactPowershellCommand:
-
-    def test_leaves_command_text_unchanged(self):
-        cmd = 'Add-DhcpServerv4Scope -Name "myscope" -SubnetMask 255.255.255.0'
-        assert redact_powershell_command(cmd) == cmd
-
-    def test_empty_command_unchanged(self):
-        assert redact_powershell_command("") == ""
 
 
 # ─── is_not_found_error ───────────────────────────────────────────────────────

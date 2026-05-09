@@ -39,10 +39,11 @@ app/
     dhcp.py                  DHCP runtime environment guard dependency
     scopes.py                scope_id and request body validation (validate_scope_id, validate_scope_request)
   models/
-    __init__.py              Re-exports DhcpScopePayload, DhcpFailover, DhcpExclusion
+    __init__.py              Re-exports all model types
     scope.py                 DhcpScopePayload — canonical request/response model
     failover.py              DhcpFailover — failover relationship configuration
     exclusion.py             DhcpExclusion — exclusion range
+    list_response.py         DhcpScopeListResponse / DhcpScopeListError — GET /scopes response
   routers/
     scopes.py                DHCP scope endpoints (POST/GET/PUT/DELETE /api/v1/scopes/{scope_id})
     health.py                /healthz runtime capability check
@@ -158,7 +159,23 @@ PowerShell execution is globally bounded by `POWERSHELL_MAX_CONCURRENCY`. Mutati
 
 The backend builds a single script that loops through all scopes and for each one runs the required DHCP cmdlets in-process, then emits one JSON array containing all scope states. This is O(1) PowerShell processes regardless of fleet size — 150 scopes cost the same as 1 scope in terms of process overhead.
 
-If any cmdlet fails, the entire list fails. A partial result is not returned.
+**Partial-result semantics** — the response is always `200` and always contains both a `scopes` list and an `errors` list:
+
+- PowerShell-level failures (connection refused, permission denied, etc.) still propagate as a `500` — in that case the entire list is unavailable.
+- Per-scope assembly errors (invalid data on the DHCP server, missing DNS option, unrecognized field format) are caught individually. The broken scope is added to `errors` with its `scopeId` and a description; all other scopes are returned normally in `scopes`.
+
+```json
+{
+  "scopes": [
+    { "scopeName": "...", "network": "10.20.30.0", "..." : "..." }
+  ],
+  "errors": [
+    { "scopeId": "10.20.31.0", "error": "No DNS servers configured for this scope" }
+  ]
+}
+```
+
+This means one corrupted scope on the DHCP server does not hide the rest of the fleet from operators.
 
 ### GET /api/v1/scopes/{scope_id} — Single Scope Read Path
 
@@ -254,12 +271,20 @@ Validation errors include compact field entries:
 
 Returns all scopes sorted by network address (ascending). Uses one PowerShell process for the entire fleet — see [GET List Read Path](#get-apiv1scopes--list-read-path) above.
 
-| Status | Body                                                    | When                            |
-| ------ | ------------------------------------------------------- | ------------------------------- |
-| `200`  | `[DhcpScopePayload, ...]`                               | Success (empty list if no scopes exist) |
-| `401`  | Standard error body with `UNAUTHORIZED`                 | Bad or missing bearer token     |
-| `500`  | Standard error body with `POWERSHELL_COMMAND_FAILED`    | PowerShell cmdlet failed        |
-| `503`  | Standard error body with `DHCP_ENVIRONMENT_UNAVAILABLE` | Host cannot run DHCP automation |
+Response body is always `DhcpScopeListResponse`:
+
+```json
+{ "scopes": [...], "errors": [...] }
+```
+
+`errors` is empty on a clean run. If individual scopes have invalid data on the DHCP server, they appear in `errors` with a `scopeId` and `error` description while all other scopes are still returned in `scopes`.
+
+| Status | Body                                                    | When                                                              |
+| ------ | ------------------------------------------------------- | ----------------------------------------------------------------- |
+| `200`  | `DhcpScopeListResponse`                                 | Success — `scopes` may be empty; `errors` lists any broken scopes |
+| `401`  | Standard error body with `UNAUTHORIZED`                 | Bad or missing bearer token                                       |
+| `500`  | Standard error body with `POWERSHELL_COMMAND_FAILED`    | PowerShell-level failure — entire list unavailable                |
+| `503`  | Standard error body with `DHCP_ENVIRONMENT_UNAVAILABLE` | Host cannot run DHCP automation                                   |
 
 ---
 
@@ -434,7 +459,7 @@ Quick reference — see the per-endpoint tables above for the exact set each rou
 
 | Code  | Meaning               | Error code examples                                                                    |
 | ----- | --------------------- | -------------------------------------------------------------------------------------- |
-| `200` | OK                    | Success response: `DhcpScopePayload`, `[DhcpScopePayload, ...]`, or `{"status": "ok"}` |
+| `200` | OK                    | Success response: `DhcpScopePayload`, `DhcpScopeListResponse`, or `{"status": "ok"}` |
 | `204` | No Content            | Success response with empty body — DELETE only                                         |
 | `400` | Bad Request           | `INVALID_SCOPE_ID`, `SCOPE_ID_MISMATCH`                                                |
 | `401` | Unauthorized          | `UNAUTHORIZED`                                                                         |

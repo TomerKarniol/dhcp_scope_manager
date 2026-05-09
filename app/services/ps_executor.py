@@ -13,15 +13,9 @@ _WIN_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s,;]+")
 _MAX_STDERR_PREVIEW_LEN = 500
 
 
-def redact_powershell_command(command: str) -> str:
-    """Return a command string safe for preview logging."""
-    return command
-
-
 def sanitize_powershell_text(value: str, *, max_len: int = _MAX_STDERR_PREVIEW_LEN) -> str:
     """Remove high-risk infrastructure details from log/client text."""
-    redacted = redact_powershell_command(value)
-    redacted = _WIN_PATH_RE.sub("<path>", redacted)
+    redacted = _WIN_PATH_RE.sub("<path>", value)
     return redacted[:max_len]
 
 
@@ -49,10 +43,6 @@ class PowerShellError(Exception):
     @property
     def safe_stderr_preview(self) -> str:
         return sanitize_powershell_text(self.stderr)
-
-    @property
-    def safe_command_preview(self) -> str:
-        return redact_powershell_command(self.command)
 
     @property
     def safe_message(self) -> str:

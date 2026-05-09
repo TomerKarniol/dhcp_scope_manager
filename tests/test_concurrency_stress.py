@@ -404,10 +404,11 @@ class TestMixedVerbWorkload:
 
     async def test_list_endpoint_under_concurrent_load(self):
         """GET /api/v1/scopes (list) invoked 50 times concurrently must all succeed."""
+        from app.models import DhcpScopeListResponse
         scope_list = [_make_scope(_network(i)) for i in range(20)]
 
-        async def mock_list() -> list:
-            return scope_list
+        async def mock_list() -> DhcpScopeListResponse:
+            return DhcpScopeListResponse(scopes=scope_list, errors=[])
 
         transport = ASGITransport(app=app, raise_app_exceptions=False)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:

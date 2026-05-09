@@ -537,30 +537,37 @@ async def test_invalid_subnet_relationship_returns_validation_error():
 # ---------------------------------------------------------------------------
 
 async def test_list_scopes_empty():
-    """Empty DHCP server must return 200 with an empty list."""
-    with patch("app.services.scope_service.list_scopes", return_value=[]):
+    """Empty DHCP server must return 200 with empty scopes and errors lists."""
+    from app.models import DhcpScopeListResponse
+    with patch("app.services.scope_service.list_scopes",
+               return_value=DhcpScopeListResponse(scopes=[], errors=[])):
         r = await client.get("/api/v1/scopes")
     assert r.status_code == 200
-    assert r.json() == []
+    body = r.json()
+    assert body == {"scopes": [], "errors": []}
 
 
 async def test_list_scopes_single():
-    """Single scope is returned as a one-element list with the canonical shape."""
+    """Single scope is returned in scopes list with the canonical shape."""
+    from app.models import DhcpScopeListResponse
     scope = _make_scope()
-    with patch("app.services.scope_service.list_scopes", return_value=[scope]):
+    with patch("app.services.scope_service.list_scopes",
+               return_value=DhcpScopeListResponse(scopes=[scope], errors=[])):
         r = await client.get("/api/v1/scopes")
     assert r.status_code == 200
-    data = r.json()
-    assert len(data) == 1
+    body = r.json()
+    assert len(body["scopes"]) == 1
+    assert body["errors"] == []
     # Verify all canonical top-level fields are present
     for field in ("scopeName", "network", "subnetMask", "startRange", "endRange",
                   "leaseDurationDays", "description", "gateway", "dnsServers",
                   "dnsDomain", "exclusions", "failover"):
-        assert field in data[0], f"canonical field '{field}' missing from list item"
+        assert field in body["scopes"][0], f"canonical field '{field}' missing from list item"
 
 
 async def test_list_scopes_multiple():
-    """Multiple scopes are returned and the list has the expected length."""
+    """Multiple scopes are returned in scopes list."""
+    from app.models import DhcpScopeListResponse
     scope_a = DhcpScopePayload(
         scopeName="Scope-A", network="10.20.30.0", subnetMask="255.255.255.0",
         startRange="10.20.30.100", endRange="10.20.30.200", leaseDurationDays=8,
@@ -573,10 +580,27 @@ async def test_list_scopes_multiple():
         description="", gateway="10.20.31.1", dnsServers=["10.0.0.53"], dnsDomain="",
         exclusions=[], failover=None,
     )
-    with patch("app.services.scope_service.list_scopes", return_value=[scope_a, scope_b]):
+    with patch("app.services.scope_service.list_scopes",
+               return_value=DhcpScopeListResponse(scopes=[scope_a, scope_b], errors=[])):
         r = await client.get("/api/v1/scopes")
     assert r.status_code == 200
-    assert len(r.json()) == 2
+    assert len(r.json()["scopes"]) == 2
+
+
+async def test_list_scopes_partial_errors_returned():
+    """Scopes with assembly errors appear in errors[], valid scopes still returned."""
+    from app.models import DhcpScopeListError, DhcpScopeListResponse
+    scope = _make_scope()
+    err = DhcpScopeListError(scopeId="10.20.31.0", error="No DNS servers configured")
+    with patch("app.services.scope_service.list_scopes",
+               return_value=DhcpScopeListResponse(scopes=[scope], errors=[err])):
+        r = await client.get("/api/v1/scopes")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["scopes"]) == 1
+    assert len(body["errors"]) == 1
+    assert body["errors"][0]["scopeId"] == "10.20.31.0"
+    assert "DNS" in body["errors"][0]["error"]
 
 
 async def test_list_scopes_ps_error_returns_500():
@@ -623,9 +647,9 @@ async def test_list_scopes_sorted_numerically():
          patch("app.services.scope_service.build_payload_from_scope_state", side_effect=fake_build):
         result = await svc_list_scopes()
 
-    assert len(result) == 2
-    assert str(result[0].network) == "10.20.9.0",  "10.20.9.0 must sort before 10.20.30.0 numerically"
-    assert str(result[1].network) == "10.20.30.0"
+    assert len(result.scopes) == 2
+    assert str(result.scopes[0].network) == "10.20.9.0",  "10.20.9.0 must sort before 10.20.30.0 numerically"
+    assert str(result.scopes[1].network) == "10.20.30.0"
 
 
 async def test_list_scopes_item_shape_matches_single_scope_get(
@@ -655,12 +679,12 @@ async def test_list_scopes_item_shape_matches_single_scope_get(
 
     assert list_r.status_code == 200
     assert single_r.status_code == 200
-    list_items = list_r.json()
+    list_body = list_r.json()
     single_item = single_r.json()
-    assert len(list_items) == 1
-    assert list_items[0] == single_item, (
+    assert len(list_body["scopes"]) == 1
+    assert list_body["scopes"][0] == single_item, (
         f"GET /scopes item differs from GET /scopes/{{scope_id}}!\n"
-        f"list[0]: {json.dumps(list_items[0])}\n"
+        f"list[0]: {json.dumps(list_body['scopes'][0])}\n"
         f"single:  {json.dumps(single_item)}"
     )
 
@@ -689,7 +713,7 @@ async def test_list_scopes_failover_null_consistent(
         list_r = await client.get("/api/v1/scopes")
 
     assert list_r.status_code == 200
-    item = list_r.json()[0]
+    item = list_r.json()["scopes"][0]
     assert "failover" in item
     assert item["failover"] is None
 

@@ -13,10 +13,9 @@ from app.utils.decorators import log_call
 @log_call
 async def validate_scope_id(scope_id: str) -> str:
     try:
-        IPv4Address(scope_id)
+        return str(IPv4Address(scope_id))
     except (AddressValueError, ValueError):
         raise InvalidScopeIdError(scope_id)
-    return scope_id
 
 
 @log_call

@@ -3,7 +3,7 @@ import logging
 from typing import Optional
 
 from app.errors import ScopeNotFoundError
-from app.models import DhcpFailover, DhcpScopePayload
+from app.models import DhcpFailover, DhcpScopeListError, DhcpScopeListResponse, DhcpScopePayload
 from app.services.ps_executor import PowerShellError, is_already_exists_error, is_not_found_error, run_ps
 from app.services.ps_parsers import (
     assemble_scope_state,
@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 def _scope_extra(scope_id: str, operation: str, **extra: object) -> dict[str, object]:
     return {"scope_id": str(scope_id), "operation": operation, **extra}
-
 
 
 def _set_options_command(scope_literal: str, payload: DhcpScopePayload) -> str:
@@ -134,19 +133,24 @@ async def _assemble_existing_scope(scope_id: str) -> DhcpScopePayload:
 # ---------------------------------------------------------------------------
 
 @log_call
-async def list_scopes() -> list[DhcpScopePayload]:
+async def list_scopes() -> DhcpScopeListResponse:
     """Return all DHCP scopes sorted by network address (ascending).
 
     Uses a single PowerShell process that fetches scope + options + exclusions +
     failover for every scope in one pass, instead of one process per scope.
     This reduces overhead from O(N) processes to O(1) for a fleet of N scopes.
 
-    If the DHCP server has no scopes, PowerShell returns null and an empty list
-    is returned. Any PowerShell error fails the entire list — a single broken
-    scope does not produce a partial result.
+    If the DHCP server has no scopes, PowerShell returns null and empty lists
+    are returned.  Any PowerShell error (connection failure, permission denied,
+    etc.) raises and results in a 500 — the entire list is unavailable in that
+    case.  Per-scope assembly errors (Pydantic validation, missing DNS option,
+    unexpected data format) are caught individually: the broken scope is added
+    to `errors` and all other scopes are still returned.
     """
     logger.info("Listing DHCP scopes", extra={"operation": "list_scopes"})
     script = build_get_all_scopes_script()
+    # Call run_ps directly (not _run_ps) so any PowerShell failure propagates as
+    # an exception — a global PS error means no scopes are available at all.
     raw = await run_ps(
         script,
         append_error_action=False,
@@ -156,13 +160,25 @@ async def list_scopes() -> list[DhcpScopePayload]:
     # normalize_list handles: None (no scopes) → [], dict (one scope) → [dict], list → list
     entries = normalize_list(raw)
     payloads: list[DhcpScopePayload] = []
+    errors: list[DhcpScopeListError] = []
     for entry in entries:
         state = normalize_get_scope_state(entry)
         scope_id = str(state["scope"].get("ScopeId", "")).strip()
         if not scope_id:
             continue
-        payloads.append(build_payload_from_scope_state(scope_id, state))
-    return sorted(payloads, key=lambda p: ip_to_int(p.network))
+        try:
+            payloads.append(build_payload_from_scope_state(scope_id, state))
+        except Exception as exc:
+            logger.warning(
+                "Skipping scope with invalid data during list",
+                extra=_scope_extra(scope_id, "list_scopes", status="error"),
+                exc_info=True,
+            )
+            errors.append(DhcpScopeListError(scopeId=scope_id, error=str(exc)))
+    return DhcpScopeListResponse(
+        scopes=sorted(payloads, key=lambda p: ip_to_int(p.network)),
+        errors=errors,
+    )
 
 
 @log_call

@@ -28,7 +28,6 @@ class AppError(Exception):
     status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
     code = ErrorCode.INTERNAL_ERROR
     message = "Internal server error"
-    details: dict[str, Any] = {}
     headers: dict[str, str] | None = None
 
     def __init__(

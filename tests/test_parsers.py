@@ -58,6 +58,17 @@ def test_parse_timespan_minutes_day_format_one_day_thirty():
     assert parse_timespan_minutes("1.00:30:00") == 1470
 
 
+def test_parse_timespan_minutes_seconds_are_ignored():
+    """Seconds component is correctly discarded — 1:30:45 → 90 minutes, not 91."""
+    assert parse_timespan_minutes("1:30:45") == 90
+
+
+def test_parse_timespan_minutes_invalid_format_raises():
+    """Unrecognized format must raise ValueError, not silently return 0."""
+    with pytest.raises(ValueError, match="Unrecognized PowerShell TimeSpan format"):
+        parse_timespan_minutes("00:01:00:00")
+
+
 def test_ip_to_int_ordering():
     assert ip_to_int("10.20.30.0") < ip_to_int("10.20.40.0")
     assert ip_to_int("10.20.30.1") < ip_to_int("10.20.30.2")

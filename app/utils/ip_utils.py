@@ -48,4 +48,7 @@ def parse_timespan_minutes(ts: str) -> int:
             return days * 24 * 60 + hours * 60 + minutes
         except ValueError:
             pass
-    return days * 24 * 60
+    raise ValueError(
+        f"Unrecognized PowerShell TimeSpan format: {ts!r}. "
+        f"Expected 'HH:MM:SS' or 'd.HH:MM:SS'."
+    )

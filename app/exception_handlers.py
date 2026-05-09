@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -20,14 +19,12 @@ from app.services.ps_executor import (
 
 logger = logging.getLogger(__name__)
 
-# Matches Windows-style absolute paths (e.g. C:\Windows\...) to strip from client responses.
-_WIN_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s,;]+")
 _MAX_PS_ERROR_LEN = 500
 
 
 def _sanitize_text(value: str, *, max_len: int = _MAX_PS_ERROR_LEN) -> str:
     """Remove high-risk infrastructure details before returning text to clients."""
-    return sanitize_powershell_text(_WIN_PATH_RE.sub("<path>", value), max_len=max_len)
+    return sanitize_powershell_text(value, max_len=max_len)
 
 
 def _error_content(

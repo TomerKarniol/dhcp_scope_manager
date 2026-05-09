@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Response, status
 from app.dependencies.auth import verify_token
 from app.dependencies.dhcp import require_dhcp_service
 from app.dependencies.scopes import validate_scope_id, validate_scope_request
-from app.models import DhcpScopePayload
+from app.models import DhcpScopeListResponse, DhcpScopePayload
 from app.services import scope_service
 from app.utils.decorators import log_call
 
@@ -20,9 +20,9 @@ router = APIRouter(
 )
 
 
-@router.get("/scopes", response_model=list[DhcpScopePayload], status_code=status.HTTP_200_OK)
+@router.get("/scopes", response_model=DhcpScopeListResponse, status_code=status.HTTP_200_OK)
 @log_call
-async def list_scopes() -> list[DhcpScopePayload]:
+async def list_scopes() -> DhcpScopeListResponse:
     logger.info("Listing DHCP scopes", extra={"operation": "list_scopes"})
     return await scope_service.list_scopes()
 

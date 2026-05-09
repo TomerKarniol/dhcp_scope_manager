@@ -483,14 +483,18 @@ class TestListScopes:
     at once. The PS script emits one {scope, options, exclusions, failover} object
     per scope (the same per-scope structure as get_scope_state).  PowerShell
     collapses a single-element array to a plain object; normalize_list() handles both.
+
+    Returns DhcpScopeListResponse with valid scopes in .scopes and per-scope
+    assembly failures in .errors so a single broken scope does not hide the rest.
     """
 
-    async def test_empty_server_returns_empty_list(self):
-        """No scopes → PS returns null → normalize_list → [] → []."""
+    async def test_empty_server_returns_empty_lists(self):
+        """No scopes → PS returns null → normalize_list → [] → empty response."""
         with patch("app.services.scope_service.run_ps", return_value=None):
             from app.services import scope_service
             result = await scope_service.list_scopes()
-        assert result == []
+        assert result.scopes == []
+        assert result.errors == []
 
     async def test_single_scope_dict_assembled(self):
         """PowerShell collapses a single-scope result to a plain dict (not a list).
@@ -510,7 +514,8 @@ class TestListScopes:
             from app.services import scope_service
             result = await scope_service.list_scopes()
 
-        assert len(result) == 1
+        assert len(result.scopes) == 1
+        assert result.errors == []
 
     async def test_multiple_scopes_sorted_numerically(self):
         """list_scopes must sort by IP integer, not lexicographically.
@@ -539,9 +544,9 @@ class TestListScopes:
             from app.services import scope_service
             result = await scope_service.list_scopes()
 
-        assert len(result) == 2
-        assert str(result[0].network) == "10.20.9.0"
-        assert str(result[1].network) == "10.20.30.0"
+        assert len(result.scopes) == 2
+        assert str(result.scopes[0].network) == "10.20.9.0"
+        assert str(result.scopes[1].network) == "10.20.30.0"
 
     async def test_entry_without_scope_id_skipped(self):
         """Entries where scope.ScopeId is absent or empty are silently skipped."""
@@ -557,4 +562,45 @@ class TestListScopes:
             from app.services import scope_service
             result = await scope_service.list_scopes()
 
-        assert len(result) == 1
+        assert len(result.scopes) == 1
+
+    async def test_broken_scope_goes_to_errors_others_returned(self):
+        """A scope that fails assembly must appear in errors, not crash the whole list."""
+        good_scope = _make_scope()
+        raw_entries = [
+            {"scope": {"ScopeId": "10.20.30.0"}, "options": [], "exclusions": [], "failover": None},
+            {"scope": {"ScopeId": "10.20.31.0"}, "options": [], "exclusions": [], "failover": None},
+        ]
+
+        def fake_build(scope_id, state):
+            if scope_id == "10.20.31.0":
+                raise ValueError("DNS servers list is empty")
+            return good_scope
+
+        with patch("app.services.scope_service.run_ps", return_value=raw_entries), \
+             patch("app.services.scope_service.build_payload_from_scope_state",
+                   side_effect=fake_build):
+            from app.services import scope_service
+            result = await scope_service.list_scopes()
+
+        assert len(result.scopes) == 1
+        assert len(result.errors) == 1
+        assert result.errors[0].scopeId == "10.20.31.0"
+        assert "DNS" in result.errors[0].error
+
+    async def test_missing_dns_scope_in_errors_not_exception(self):
+        """DhcpConflictError from missing DNS servers must land in errors, not propagate."""
+        from app.errors import DhcpConflictError
+        raw_entries = [
+            {"scope": {"ScopeId": "10.20.30.0"}, "options": [], "exclusions": [], "failover": None},
+        ]
+
+        with patch("app.services.scope_service.run_ps", return_value=raw_entries), \
+             patch("app.services.scope_service.build_payload_from_scope_state",
+                   side_effect=DhcpConflictError("No DNS servers configured for this scope")):
+            from app.services import scope_service
+            result = await scope_service.list_scopes()
+
+        assert result.scopes == []
+        assert len(result.errors) == 1
+        assert result.errors[0].scopeId == "10.20.30.0"
