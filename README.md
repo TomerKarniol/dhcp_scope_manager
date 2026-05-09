@@ -65,9 +65,8 @@ helm/
     _dhcp-helpers.tpl        Canonical payload rendering for provider-http
 
 scripts/
-  validate_dhcp_values.py    Self-contained Pydantic validator — call with one or more values files
-  validate_changed_clusters.py  CI entry point — discovers changed cluster files via git diff,
-                                resolves full merge chain, calls validate_dhcp_values.py for each
+  validate_values.py         Self-contained CI validator — discovers all clusters, merges inheritance
+                             chains, and runs full DHCP + API + Crossplane + Kubernetes validation
   requirements.txt           Minimal CI dependencies (pydantic, PyYAML)
 
 tests/
@@ -87,6 +86,7 @@ tests/
   test_helm.py               Helm-rendered Crossplane Request contract
   test_security.py           PowerShell escaping and response sanitization
   test_service_unit.py       Focused scope_service create/get/delete/list behavior
+  test_validate_values.py    CI validator — validators, discovery, YAML merge, JSON output
 ```
 
 ## Runtime Requirements
@@ -487,26 +487,63 @@ Helm deep-merges `{}` with the parent map, leaving failover intact. Only `null` 
 
 ## CI Validation
 
-Two scripts validate `dhcp_values` before anything reaches Crossplane:
+`scripts/validate_values.py` is a self-contained validator that mirrors the FastAPI/Pydantic
+validation logic. It runs in CI before any values file reaches Crossplane.
 
-```bash
-# Validate one cluster directly
-python scripts/validate_dhcp_values.py sites/site-a/mce/mce-1/hosted-cluster/cluster-1.yaml
+### What it validates
 
-# Auto-detect changed cluster files from git and validate each with its full merge chain
-python scripts/validate_changed_clusters.py
+| Area               | Checks                                                                            |
+| ------------------ | --------------------------------------------------------------------------------- |
+| Required fields    | All mandatory `dhcp_values` and `apiServer` fields present                        |
+| DHCP scope (Pydantic) | IP address validity, subnet consistency, range ordering, exclusion overlaps, gateway-in-range guard, failover mode enforcement |
+| Exclusion order    | Warns if exclusions are not in ascending IP order (would cause Crossplane PUT loop) |
+| DNS servers        | Warns on duplicate entries                                                        |
+| DNS domain         | No spaces, max 256 chars                                                          |
+| API server         | URL scheme, hostname, trailing slash (warns — double slash causes 404)            |
+| Secret ref names   | `tokenSecretRef` fields are valid Kubernetes DNS labels                           |
+| Crossplane names   | `namespace` and `providerConfigName` are valid Kubernetes DNS labels              |
+| CR name length     | Ensures `dhcp-scope-{network}` is within the 63-char Kubernetes name limit        |
+| Parity risks       | Warns on `failover: {}`, missing `description`, missing `gateway`                 |
 
-# Validate all clusters regardless of what changed
-python scripts/validate_changed_clusters.py --all
-```
-
-Install CI dependencies (pydantic + PyYAML only — no FastAPI stack needed):
+### Usage
 
 ```bash
 pip install -r scripts/requirements.txt
+
+# Main CI mode — discover and validate all hosted clusters under sites/
+python scripts/validate_values.py --repo-root . --warnings-as-errors
+
+# Manual layered validation (site → MCE → hosted-cluster)
+python scripts/validate_values.py \
+  --site-values     sites/site-a/values.yaml \
+  --mce-values      sites/site-a/mce-a/values.yaml \
+  --hosted-cluster-values sites/site-a/mce-a/cluster-a/values.yaml
+
+# Single-file validation (no inheritance)
+python scripts/validate_values.py --values helm/values.yaml
+
+# JSON output (useful for downstream tooling)
+python scripts/validate_values.py --repo-root . --output json
 ```
 
-GitLab CI job:
+Exit codes: `0` = pass, `1` = errors (or warnings with `--warnings-as-errors`), `2` = script error.
+
+### Supported directory layouts
+
+```text
+# New layout
+sites/{site}/{mce}/{cluster}/values.yaml
+
+# Old layout
+sites/{site}/mce/{mce}/hosted-cluster/{cluster}.yaml
+```
+
+Both layouts can coexist. Inheritance files (`values.yaml` at site and MCE level) are picked up
+automatically.
+
+### GitLab CI
+
+The `.gitlab-ci.yml` at the repo root includes the validation job:
 
 ```yaml
 validate-dhcp-values:
@@ -515,17 +552,14 @@ validate-dhcp-values:
   before_script:
     - pip install --quiet -r scripts/requirements.txt
   script:
-    - python scripts/validate_changed_clusters.py
+    - python scripts/validate_values.py --repo-root . --warnings-as-errors
   rules:
-    - changes:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
         - sites/**/*.yaml
+        - helm/**/*.yaml
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 ```
-
-`validate_changed_clusters.py` is smart about scope:
-
-- `sites/{site}/config.yaml` changed → validates all clusters in that site
-- `sites/{site}/mce/{mce}/config.yaml` changed → validates all clusters in that MCE
-- `sites/{site}/mce/{mce}/hosted-cluster/{cluster}.yaml` changed → validates just that cluster
 
 ## Security and Safety
 
@@ -575,6 +609,7 @@ Test coverage includes:
 - GET/PUT parity contract — the main guard against Crossplane reconciliation loops
 - Helm-rendered Crossplane Request contract
 - Security checks for PowerShell escaping and response sanitization
+- CI validator: all validators, YAML deep-merge, cluster discovery (old and new layouts), JSON reporter
 
 The repository virtualenv is preferred because the system Python may not have runtime dependencies such as `pydantic-settings` installed.
 
