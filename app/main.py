@@ -11,8 +11,7 @@ from fastapi import FastAPI
 from app.config import settings
 from app.logging_config import configure_logging
 from app.exception_handlers import register_exception_handlers
-from app.routers.scopes import router as scopes_router
-from app.routers.health import router as health_router
+from app.routers import router
 
 configure_logging(settings.LOG_LEVEL)
 
@@ -25,8 +24,7 @@ app = FastAPI(
     ),
 )
 
-app.include_router(scopes_router)
-app.include_router(health_router)
+app.include_router(router)
 
 register_exception_handlers(app)
 

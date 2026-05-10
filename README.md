@@ -45,6 +45,7 @@ app/
     exclusion.py             DhcpExclusion — exclusion range
     list_response.py         DhcpScopeListResponse / DhcpScopeListError — GET /scopes response
   routers/
+    __init__.py              Aggregates all sub-routers into a single router — main.py imports only this
     scopes.py                DHCP scope endpoints (POST/GET/PUT/DELETE /api/v1/scopes/{scope_id})
     health.py                /healthz runtime capability check
   services/
