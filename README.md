@@ -153,63 +153,6 @@ async FastAPI route
 
 PowerShell execution is globally bounded by `POWERSHELL_MAX_CONCURRENCY`. Mutating operations (`POST`, `PUT`, `DELETE`) also take an async per-scope lock, so two writes for `10.20.30.0` are serialized while writes for different scopes can run concurrently up to the global limit.
 
-### GET /api/v1/scopes — List Read Path
-
-`GET /api/v1/scopes` fetches all scopes using **one PowerShell process** for the entire fleet.
-
-The backend builds a single script that loops through all scopes and for each one runs the required DHCP cmdlets in-process, then emits one JSON array containing all scope states. This is O(1) PowerShell processes regardless of fleet size — 150 scopes cost the same as 1 scope in terms of process overhead.
-
-**Partial-result semantics** — the response is always `200` and always contains both a `scopes` list and an `errors` list:
-
-- PowerShell-level failures (connection refused, permission denied, etc.) still propagate as a `500` — in that case the entire list is unavailable.
-- Per-scope assembly errors (invalid data on the DHCP server, missing DNS option, unrecognized field format) are caught individually. The broken scope is added to `errors` with its `scopeId` and a description; all other scopes are returned normally in `scopes`.
-
-```json
-{
-  "scopes": [
-    { "scopeName": "...", "network": "10.20.30.0", "..." : "..." }
-  ],
-  "errors": [
-    { "scopeId": "10.20.31.0", "error": "No DNS servers configured for this scope" }
-  ]
-}
-```
-
-This means one corrupted scope on the DHCP server does not hide the rest of the fleet from operators.
-
-### GET /api/v1/scopes/{scope_id} — Single Scope Read Path
-
-`GET /api/v1/scopes/{scope_id}` assembles the canonical `DhcpScopePayload` with one PowerShell process.
-
-The backend builds a single script that runs the required DHCP cmdlets in-process:
-
-1. `Get-DhcpServerv4Scope -ScopeId ...`
-2. `Get-DhcpServerv4OptionValue -ScopeId ...`
-3. `Get-DhcpServerv4ExclusionRange -ScopeId ...`
-4. `Get-DhcpServerv4Failover -ScopeId ...`
-
-The script emits one compressed JSON object:
-
-```json
-{
-  "scope": {},
-  "options": [],
-  "exclusions": [],
-  "failover": null
-}
-```
-
-`options` and `exclusions` are array-wrapped in PowerShell so single-result output does not collapse into an object. The script uses `ConvertTo-Json -Depth 10 -Compress` to avoid nested object truncation.
-
-Optional object behavior is deliberate:
-
-- Missing scope is an error and becomes the normal `404 SCOPE_NOT_FOUND` path.
-- Missing exclusions are normal and become `exclusions: []`.
-- Missing failover is normal and becomes `failover: null`.
-- Any other exclusion/failover failure is re-thrown so permission errors, DHCP server issues, or PowerShell crashes do not get hidden as empty state.
-
-`scope_id` is validated as an IPv4 address before the script is built and is inserted through a central PowerShell single-quote literal helper.
-
 ## Error Response Format
 
 All API errors use the same envelope:
@@ -269,15 +212,23 @@ Validation errors include compact field entries:
 
 ### `GET /api/v1/scopes`
 
-Returns all scopes sorted by network address (ascending). Uses one PowerShell process for the entire fleet — see [GET List Read Path](#get-apiv1scopes--list-read-path) above.
+Returns all scopes sorted by network address (ascending). Uses **one PowerShell process** for the entire fleet — the backend builds a single script that loops through all scopes, runs the required DHCP cmdlets in-process, and emits one JSON array. This is O(1) PowerShell processes regardless of fleet size.
 
-Response body is always `DhcpScopeListResponse`:
+**Partial-result semantics** — the response is always `200` and always contains both a `scopes` list and an `errors` list:
+
+- PowerShell-level failures (connection refused, permission denied, etc.) propagate as `500` — the entire list is unavailable.
+- Per-scope assembly errors (invalid data, missing DNS option, unrecognized field format) are caught individually. The broken scope is added to `errors` with its `scopeId` and a description; all other scopes are returned normally in `scopes`.
 
 ```json
-{ "scopes": [...], "errors": [...] }
+{
+  "scopes": [
+    { "scopeName": "...", "network": "10.20.30.0", "..." : "..." }
+  ],
+  "errors": [
+    { "scopeId": "10.20.31.0", "error": "No DNS servers configured for this scope" }
+  ]
+}
 ```
-
-`errors` is empty on a clean run. If individual scopes have invalid data on the DHCP server, they appear in `errors` with a `scopeId` and `error` description while all other scopes are still returned in `scopes`.
 
 | Status | Body                                                    | When                                                              |
 | ------ | ------------------------------------------------------- | ----------------------------------------------------------------- |
@@ -309,7 +260,14 @@ Creates the scope if it does not exist, then converges all options, exclusions, 
 
 Returns the current canonical state of the scope. When Crossplane sees a `404` here it issues `POST` to create the scope.
 
-This endpoint uses the optimized single-process GET read path described above, so one Crossplane observe spawns one PowerShell process for the scope state assembly.
+The backend builds a single script that runs all required DHCP cmdlets in-process (one PowerShell process):
+
+1. `Get-DhcpServerv4Scope -ScopeId ...`
+2. `Get-DhcpServerv4OptionValue -ScopeId ...`
+3. `Get-DhcpServerv4ExclusionRange -ScopeId ...`
+4. `Get-DhcpServerv4Failover -ScopeId ...`
+
+`options` and `exclusions` are array-wrapped in PowerShell so single-result output does not collapse into an object. Missing exclusions become `[]`, missing failover becomes `null`, missing scope becomes `404 SCOPE_NOT_FOUND`. Any other cmdlet failure is re-thrown rather than silently returning empty state. `scope_id` is validated as an IPv4 address and inserted through a central PowerShell single-quote literal helper.
 
 | Status | Body                                                    | When                                                       |
 | ------ | ------------------------------------------------------- | ---------------------------------------------------------- |
