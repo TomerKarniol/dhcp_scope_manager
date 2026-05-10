@@ -1,4 +1,4 @@
-# DHCP Backend With Crossplane
+# DHCP Scope Manager
 
 A production-oriented FastAPI service for managing Windows DHCP IPv4 scopes through PowerShell, designed for GitOps reconciliation with Crossplane `provider-http`.
 
