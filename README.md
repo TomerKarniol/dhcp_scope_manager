@@ -449,8 +449,19 @@ Key behaviors:
 - **`providerConfigRef.name`** is configurable via `crossplane.providerConfigName`
   (defaults to `dhcp-http`).
 
+Reference chart render (single file):
+
 ```bash
 helm template dhcp-request ./helm -f ./helm/values.yaml
+```
+
+Production render (three-layer merge — later file wins):
+
+```bash
+helm template dhcp-scope-hc-workers ./helm \
+  -f sites/site-a/values.yaml \
+  -f sites/site-a/mce-1/values.yaml \
+  -f sites/site-a/mce-1/hc-workers.yaml
 ```
 
 ## HTTP Response Codes
@@ -515,9 +526,9 @@ python scripts/validate_values.py --repo-root . --warnings-as-errors
 
 # Manual layered validation (site → MCE → hosted-cluster)
 python scripts/validate_values.py \
-  --site-values     sites/site-a/values.yaml \
-  --mce-values      sites/site-a/mce-a/values.yaml \
-  --hosted-cluster-values sites/site-a/mce-a/cluster-a/values.yaml
+  --site-values           sites/site-a/values.yaml \
+  --mce-values            sites/site-a/mce-1/values.yaml \
+  --hosted-cluster-values sites/site-a/mce-1/hc-workers.yaml
 
 # Single-file validation (no inheritance)
 python scripts/validate_values.py --values helm/values.yaml
@@ -528,18 +539,37 @@ python scripts/validate_values.py --repo-root . --output json
 
 Exit codes: `0` = pass, `1` = errors (or warnings with `--warnings-as-errors`), `2` = script error.
 
-### Supported directory layouts
+### Directory layout
+
+Each hosted cluster is a single YAML file inside its MCE folder.
+Site- and MCE-level `values.yaml` files provide defaults that each HC file can override.
 
 ```text
-# New layout
-sites/{site}/{mce}/{cluster}/values.yaml
-
-# Old layout
-sites/{site}/mce/{mce}/hosted-cluster/{cluster}.yaml
+sites/
+  {site}/
+    values.yaml          ← site-level defaults (DNS, crossplane providerConfig, apiServer URL)
+    {mce}/
+      values.yaml        ← MCE-level overrides (failover relationship, partner server)
+      {hc-name}.yaml     ← HC-specific values (network, scopeName, ranges, exclusions)
+      {hc-name}.yaml
+    {mce}/
+      values.yaml
+      {hc-name}.yaml
+  {site}/
+    values.yaml
+    ...
 ```
 
-Both layouts can coexist. Inheritance files (`values.yaml` at site and MCE level) are picked up
-automatically.
+Helm merge order (later file wins):
+
+```bash
+helm template dhcp-scope-{hc} ./helm \
+  -f sites/{site}/values.yaml \
+  -f sites/{site}/{mce}/values.yaml \
+  -f sites/{site}/{mce}/{hc}.yaml
+```
+
+The CI validator discovers all HC files automatically and applies the same merge order.
 
 ### GitLab CI
 
